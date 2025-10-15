@@ -1,10 +1,9 @@
-module Autoscaler
+module Autoscalers
 
 using Tables
-export AutoscaleCostFunction, to_table
+export Autoscaler, to_table
 
-# TODO: only above/ only-below
-struct AutoscaleCostFunction
+struct Autoscaler
     x_values::Vector{Float64}
     x_scaled::Vector{Float64}
     y_values::Vector{Float64}
@@ -20,13 +19,13 @@ struct AutoscaleCostFunction
 
     side::Symbol
 end
-function AutoscaleCostFunction(side=:both; x, y, dy, l)
-    return AutoscaleCostFunction(x, y, dy, l, side)
+function Autoscaler(side::Symbol=:both; x, y, y_err, size)
+    return Autoscaler(x, y, y_err, size, side)
 end
-function AutoscaleCostFunction(x, y, dy, l, side=:both)
-    return AutoscaleCostFunction((; x, y, dy, l), side)
+function Autoscaler(x, y, y_err, size, side::Symbol=:both)
+    return Autoscaler((; x, y, y_err, size), side)
 end
-function AutoscaleCostFunction(table, side=:both; x=:x, y=:y, dy=:dy, size=:l)
+function Autoscaler(table, side::Symbol=:both; x=:x, y=:y, y_err=:y_err, size=:l)
     if side ∉ (:both, :above, :below)
         throw(ArgumentError("`side` can only be `:both`, `:above`, or `:below`"))
     end
@@ -34,7 +33,6 @@ function AutoscaleCostFunction(table, side=:both; x=:x, y=:y, dy=:dy, size=:l)
     rows = collect(Tables.rows(table))
     sort!(rows, by=r -> (r[size], r[x]))
 
-    len = length(rows)
     x_values = Float64[]
     x_scaled = Float64[]
     y_values = Float64[]
@@ -47,7 +45,7 @@ function AutoscaleCostFunction(table, side=:both; x=:x, y=:y, dy=:dy, size=:l)
     start_index = 0
     i = 0
     for row in rows
-        if iszero(row[dy])
+        if iszero(row[y_err])
             @warn "Some data points have zero errors. Skipping." maxlog=1
             continue
         end
@@ -65,50 +63,59 @@ function AutoscaleCostFunction(table, side=:both; x=:x, y=:y, dy=:dy, size=:l)
         push!(x_values, row[x])
         push!(x_scaled, row[x])
         push!(y_values, row[y])
-        push!(y_errors, row[dy])
+        push!(y_errors, row[y_err])
         push!(sizes, row[size])
     end
-    size_map[prev_size] = start_index:len
+    size_map[prev_size] = start_index:length(x_values)
 
-    return AutoscaleCostFunction(
+    return Autoscaler(
         x_values, x_scaled, y_values, y_errors, sizes, avail_sizes, size_map,
         Float64[], Float64[], Float64[], side,
     )
 end
 
-function to_table(c::AutoscaleCostFunction, x_crit, ν)
+function to_table(c::Autoscaler, x_crit, ν)
     transform_x!(c, x_crit, ν)
-    return (; size=c.sizes, x=c.x_scaled, y=c.y_values, dy=c.y_errors)
+    master_curve = [master_curve_at(c, x, size) for (x, size) in zip(c.x_scaled, c.sizes)]
+    return (;
+        size=c.sizes,
+        x_scaled=c.x_scaled,
+        x_unscaled=c.x_values,
+        y=c.y_values,
+        y_err=c.y_errors,
+        master_curve,
+    )
 end
 
-function transform_x!(c::AutoscaleCostFunction, x_crit, ν)
+function transform_x!(c::Autoscaler, x_crit, ν)
     c.x_scaled .= c.x_values .- x_crit
     if c.side == :below
-        c.x_scaled[c.x_scaled ≥ 0.0] .= NaN
+        c.x_scaled[c.x_scaled .≥ 0.0] .= NaN
     elseif c.side == :above
-        c.x_scaled[c.x_scaled ≤ 0.0] .= NaN
+        c.x_scaled[c.x_scaled .≤ 0.0] .= NaN
     end
     c.x_scaled .= c.sizes .* sign.(c.x_scaled) .* abs.(c.x_scaled) .^ ν
 end
 
-function scaled_data(c::AutoscaleCostFunction, size)
+function scaled_data(c::Autoscaler, size)
     range = c.size_map[size]
     return view(c.x_scaled, range), view(c.y_values, range), view(c.y_errors, range)
 end
 
-function select_subset(c::AutoscaleCostFunction, selected_x, selected_size)
+function select_subset(c::Autoscaler, selected_x, selected_size)
     empty!(c.selected_x_values)
     empty!(c.selected_y_values)
     empty!(c.selected_y_errors)
     for size in c.avail_sizes
         size == selected_size && continue
-        x, y, dy = scaled_data(c, size)
+        x, y, y_err = scaled_data(c, size)
         for i in eachindex(x)
+            isnan(x[i]) && continue
             if x[i] > selected_x
-                if i > 1
+                if i > 1 && !isnan(x[i-1])
                     append!(c.selected_x_values, (x[i-1], x[i]))
                     append!(c.selected_y_values, (y[i-1], y[i]))
-                    append!(c.selected_y_errors, (dy[i-1], dy[i]))
+                    append!(c.selected_y_errors, (y_err[i-1], y_err[i]))
                 end
                 break
             end
@@ -117,13 +124,13 @@ function select_subset(c::AutoscaleCostFunction, selected_x, selected_size)
     return c.selected_x_values, c.selected_y_values, c.selected_y_errors
 end
 
-function master_curve_at(c::AutoscaleCostFunction, selected_x, selected_size)
-    x, y, dy = select_subset(c, selected_x, selected_size)
+function master_curve_at(c::Autoscaler, selected_x, selected_size)
+    x, y, y_err = select_subset(c, selected_x, selected_size)
     if isempty(x)
         return missing
     else
-        dy .= 1 ./ dy .^ 2
-        weights = dy
+        y_err .= 1 ./ y_err .^ 2
+        weights = y_err
         indices = eachindex(weights)
 
         K = sum(weights[i] for i in indices)
@@ -140,13 +147,11 @@ function master_curve_at(c::AutoscaleCostFunction, selected_x, selected_size)
     end
 end
 
-
-function (c::AutoscaleCostFunction)(params::Vector)
+function (c::Autoscaler)(params::Vector)
     return c(params...)
 end
-function (c::AutoscaleCostFunction)(x_crit, ν)
+function (c::Autoscaler)(x_crit, ν)
     transform_x!(c, x_crit, ν)
-
     s = 0.0
     n = 0
     for i in eachindex(c.x_values)
@@ -160,19 +165,18 @@ function (c::AutoscaleCostFunction)(x_crit, ν)
     return s / n
 end
 
-struct PartiallyAppliedAutoscaleCostFunction
-    cost_fun::AutoscaleCostFunction
+struct PartiallyAppliedAutoscaler
+    cost_fun::Autoscaler
     x_crit::Float64
 end
-function (c::AutoscaleCostFunction)(x_crit)
-    return PartiallyAppliedAutoscaleCostFunction(c, x_crit)
+function (c::Autoscaler)(x_crit)
+    return PartiallyAppliedAutoscaler(c, x_crit)
 end
-function (c::PartiallyAppliedAutoscaleCostFunction)(param::Vector)
+function (c::PartiallyAppliedAutoscaler)(param::Vector)
     return c.cost_fun(c.x_crit, param[1])
 end
-function (c::PartiallyAppliedAutoscaleCostFunction)(ν)
+function (c::PartiallyAppliedAutoscaler)(ν)
     return c.cost_fun(c.x_crit, ν)
 end
-
 
 end
