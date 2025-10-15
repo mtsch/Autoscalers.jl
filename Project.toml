@@ -1,0 +1,10 @@
+name = "Autoscaler"
+uuid = "69a6282e-b184-404d-a839-cff20abdae59"
+authors = ["mtsch <matijacufar@gmail.com>"]
+version = "0.1.0"
+
+[deps]
+Tables = "bd369af6-aec1-5ad0-b16a-f7cc5008161c"
+
+[compat]
+Tables = "1.12.1"
