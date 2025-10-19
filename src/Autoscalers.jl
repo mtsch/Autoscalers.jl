@@ -1,12 +1,11 @@
 module Autoscalers
 
 using Tables
-export Autoscaler, to_table
+using Measurements
+export Autoscaler, to_table, @ansatz
 
 include("ansatz.jl")
 
-# TODO: custom scaling ansatz
-Autoscaler = Autoscaler1
 
 
 """
@@ -18,7 +17,9 @@ Autoscaler = Autoscaler1
 
 ```
 """
-struct Autoscaler1{N}
+struct Autoscaler4{N,S<:ScalingAnsatz{N}}
+    ansatz::S
+
     x_val_raw::Vector{Float64}
     y_val_raw::Vector{Float64}
     y_err_raw::Vector{Float64}
@@ -36,25 +37,16 @@ struct Autoscaler1{N}
     selected_y_val::Vector{Float64}
     selected_y_err::Vector{Float64}
 
-    side::Symbol
-
-    x_crit_hardcode::Float64
-    a_hardcode::Float64
-    b_hardcode::Float64
+    hardcodes::Vector{Float64}
+    last_params::Vector{Float64}
 end
-function Autoscaler1(side::Symbol=:both; x, y, y_err, size, kwargs...)
-    return Autoscaler1(x, y, y_err, size, side)
+function Autoscaler4(ansatz::ScalingAnsatz=DEFAULT_ANSATZ; x, y, y_err, L, kwargs...)
+    return Autoscaler4(x, y, y_err, size)
 end
-function Autoscaler1(x, y, y_err, size, side::Symbol=:both; kwargs...)
-    return Autoscaler1((; x, y, y_err, size), side)
-end
-function Autoscaler1(
-    table, side::Symbol=:both;
-    x=:x, y=:y, y_err=:y_err, L=:L, a=nothing, b=nothing, x_crit=nothing
+function Autoscaler4(
+    table, ansatz::ScalingAnsatz=DEFAULT_ANSATZ;
+    x=:x, y=:y, y_err=:y_err, L=:L, kwargs...
 )
-    if side ∉ (:both, :above, :below)
-        throw(ArgumentError("`side` can only be `:both`, `:above`, or `:below`"))
-    end
 
     rows = collect(Tables.rows(table))
     sort!(rows, by=r -> (r[L], r[x]))
@@ -92,43 +84,44 @@ function Autoscaler1(
     end
     size_map[prev_size] = start_index:length(x_val_raw)
 
-    num_params = 0
-    if isnothing(a)
-        a = NaN
-        num_params += 1
-    end
-    if isnothing(b)
-        b = NaN
-        num_params += 1
-    end
-    if isnothing(x_crit)
-        x_crit = NaN
-        num_params += 1
-    end
-
-    return Autoscaler1{num_params}(
+    result = Autoscaler4(
+        ansatz,
         x_val_raw, y_val_raw, y_err_raw,
         copy(x_val_raw), copy(y_val_raw), copy(y_err_raw),
         sizes, avail_sizes, size_map,
-        Float64[], Float64[], Float64[], side,
-        x_crit, a, b,
+        Float64[], Float64[], Float64[],
+        fill(NaN, length(ansatz.param_names)), zeros(length(ansatz.param_names)),
     )
+    return hardcode_params!(result; kwargs...)
 end
 
-function transform!(c::Autoscaler1, x_crit, a, b)
-    c.x_val_scaled .= c.x_val_raw .- x_crit
-    if c.side == :below
-        c.x_val_scaled[c.x_val_scaled .≥ 0.0] .= NaN
-    elseif c.side == :above
-        c.x_val_scaled[c.x_val_scaled .≤ 0.0] .= NaN
+function hardcode_params!(c::Autoscaler4; kwargs...)
+    param_names = c.ansatz.param_names
+    hardcodes = c.hardcodes
+    for (i, p) in enumerate(param_names)
+        hardcodes[i] = get(kwargs, p, NaN)
     end
-    c.x_val_scaled .= c.sizes .^ a .* c.x_val_scaled
-    c.y_val_scaled .= c.sizes .^ b .* c.y_val_raw
-    c.y_err_scaled .= c.sizes .^ b .* c.y_err_raw
+    return c
+end
+
+function Base.show(io::IO, c::Autoscaler4)
+    print(io, "AutoScaler(", c.ansatz, "...)")
+end
+
+function transform!(c::Autoscaler4, params)
+    for i in eachindex(c.x_val_scaled)
+        L, x, y, y_err = c.sizes[i], c.x_val_raw[i], c.y_val_raw[i], c.y_err_raw[i]
+
+        c.x_val_scaled[i] = c.ansatz.scale_x(x, L, params)
+
+        y_measurement_scaled = c.ansatz.scale_y(y ± y_err, L, params)
+        c.y_val_scaled[i] = y_measurement_scaled.val
+        c.y_err_scaled[i] = y_measurement_scaled.err
+    end
     return nothing
 end
 
-function scaled_data(c::Autoscaler1, size)
+function scaled_data(c::Autoscaler4, size)
     range = c.size_map[size]
     return (
         view(c.x_val_scaled, range),
@@ -137,7 +130,7 @@ function scaled_data(c::Autoscaler1, size)
     )
 end
 
-function select_subset(c::Autoscaler1, selected_x, selected_size)
+function select_subset(c::Autoscaler4, selected_x, selected_size)
     empty!(c.selected_x_val)
     empty!(c.selected_y_val)
     empty!(c.selected_y_err)
@@ -159,10 +152,10 @@ function select_subset(c::Autoscaler1, selected_x, selected_size)
     return c.selected_x_val, c.selected_y_val, c.selected_y_err
 end
 
-function master_curve_at(c::Autoscaler1, selected_x, selected_size)
-return improved_master_curve_at(c, selected_x, selected_size)
+function master_curve_at(c::Autoscaler4, selected_x, selected_size)
+    return improved_master_curve_at(c, selected_x, selected_size)
 end
-function classic_master_curve_at(c::Autoscaler1, selected_x, selected_size)
+function classic_master_curve_at(c::Autoscaler4, selected_x, selected_size)
     x, y, y_err = select_subset(c, selected_x, selected_size)
     if isempty(x)
         return missing
@@ -189,7 +182,7 @@ function lerp(left, right, selected_x)
     x2, y2 = right
     return (y1 * (x2 - selected_x) + y2 * (selected_x - x1)) / (x2 - x1)
 end
-function improved_master_curve_at(c::Autoscaler1, selected_x, selected_size)
+function improved_master_curve_at(c::Autoscaler4, selected_x, selected_size)
     x, y, y_err = select_subset(c, selected_x, selected_size)
     if isempty(x)
         return missing
@@ -212,11 +205,11 @@ function improved_master_curve_at(c::Autoscaler1, selected_x, selected_size)
     end
 end
 
-function cost_function(c::Autoscaler1, x_crit, a, b)
-    return standard_cost_function(c, x_crit, a, b)
+function cost_function(c::Autoscaler4, params)
+    return standard_cost_function(c, params)
 end
-function standard_cost_function(c::Autoscaler1, x_crit, a, b)
-    transform!(c, x_crit, a, b)
+function standard_cost_function(c::Autoscaler4, params)
+    transform!(c, params)
     s = 0.0
     n = 0
     for i in eachindex(c.x_val_raw)
@@ -229,8 +222,8 @@ function standard_cost_function(c::Autoscaler1, x_crit, a, b)
     end
     return s / n
 end
-function gaussian_cost_function(c::Autoscaler1, x_crit, a, b, σ=0.01)
-    transform!(c, x_crit, a, b)
+function gaussian_cost_function(c::Autoscaler4, params, σ=0.01)
+    transform!(c, params)
     s = 0.0
     n = 0.0
     for i in eachindex(c.x_val_raw)
@@ -245,64 +238,64 @@ function gaussian_cost_function(c::Autoscaler1, x_crit, a, b, σ=0.01)
     return s / n
 end
 
+
 """
-    get_parameters(c::Autoscaler1{N}, args)
+    get_parameters(c::Autoscaler4{N}, args)
 
 Get the parameters `x_crit`, `a`, `b` taking hardcoded values into account. `args` must be
 of an appropriate length.
 """
-function get_parameters(c::Autoscaler1{N}, args) where {N}
-    if length(args) ≠ N
-        throw(ArgumentError("$N parameters expected, $(length(args)) given"))
+function get_parameters(c::Autoscaler4, args)
+    expected = count(isnan, c.hardcodes)
+    if length(args) ≠ expected
+        throw(ArgumentError("expected $(expected) params, got $(length(args))"))
     end
-    arg_index = 0
-    if isnan(c.x_crit_hardcode)
-        arg_index += 1
-        x_crit = args[arg_index]
-    else
-        x_crit = c.x_crit_hardcode
+
+    params = c.last_params
+    param_names = c.ansatz.param_names
+
+    arg_idx = 1
+    for i in eachindex(params)
+        name = param_names[i]
+        if isnan(c.hardcodes[i])
+            params[i] = args[arg_idx]
+            arg_idx += 1
+        else
+            params[i] = c.hardcodes[i]
+        end
     end
-    if isnan(c.a_hardcode)
-        arg_index += 1
-        a = args[arg_index]
-    else
-        a = c.a_hardcode
-    end
-    if isnan(c.b_hardcode)
-        arg_index += 1
-        b = args[arg_index]
-    else
-        b = c.b_hardcode
-    end
-    return x_crit, a, b
+
+    return params
 end
 
-function (c::Autoscaler1)(params::Vector)
-    x_crit, a, b = get_parameters(c, params)
-    return cost_function(c, x_crit, a, b)
+function (c::Autoscaler4)(params::Vector)
+    params = get_parameters(c, params)
+    return cost_function(c, params)
 end
-function (c::Autoscaler1{N})(args::Vararg{<:Real,N}) where {N}
-    x_crit, a, b = get_parameters(c, args)
-    return cost_function(c, x_crit, a, b)
+function (c::Autoscaler4)(args::Vararg{<:Real})
+    params = get_parameters(c, args)
+    return cost_function(c, params)
 end
 
-function to_table(c::Autoscaler1{N}, args::Vararg{<:Real,N}) where {N}
+function to_table(c::Autoscaler4, args::Vararg{<:Real})
     return to_table(c, args)
 end
-function to_table(c::Autoscaler1, args::Union{Vector,Tuple})
-    x_crit, a, b = get_parameters(c, args)
-    transform!(c, x_crit, a, b)
+function to_table(c::Autoscaler4, args::Union{Vector,Tuple})
+    params = get_parameters(c, args)
+    transform!(c, params)
     master_curve = [
         master_curve_at(c, x, size) for (x, size) in zip(c.x_val_scaled, c.sizes)
     ]
     return (;
-        L=c.sizes,
-        x=c.x_val_scaled,
-        y=c.y_val_scaled,
-        y_err=c.y_err_scaled,
+        L=copy(c.sizes),
+        x=copy(c.x_val_scaled),
+        y=copy(c.y_val_scaled),
+        y_err=copy(c.y_err_scaled),
         master_curve,
     )
 end
 
+# TODO: custom scaling ansatz
+Autoscaler = Autoscaler4
 
 end
