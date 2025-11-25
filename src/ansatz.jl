@@ -71,6 +71,7 @@ macro ansatz(expr, exprs...)
     expr_left = replace_params!(expr_left, param_mapping)
     expr_right = replace_params!(expr_right, param_mapping)
 
+    # TODO is linear in y
     scale_y = quote
         function(y, L, params)
             return $expr_left

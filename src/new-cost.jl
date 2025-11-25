@@ -12,29 +12,30 @@ function deviation_at(a::Autoscaler, x, selected_size, selected_curve)
     return δ
 end
 
-function partial_cost_function(a::Autoscaler, selected_size, (lo, hi)=window(a))
-    selected_curve = scaled_data(a, selected_size)
+function master_curve(points, skip)
+    numerator = 0.0
+    denominator = 0.0
 
-    res = 0.0
-    xs = range(lo, hi; length=10_000)
-    x_prev = first(xs)
-    y_prev, dy2_prev = interpolate(selected_curve..., x_prev; sq_errs=true)
-    Y_prev, dY2_prev = better_master_curve(a, x_prev, selected_size)
-    δ2_prev = (y_prev - Y_prev)^2 / (dy2_prev + dY2_prev)
-    for i in 2:length(xs)
-        x_curr = xs[i]
-        y_curr, dy2_curr = interpolate(selected_curve..., x_curr; sq_errs=true)
-        Y_curr, dY2_curr = better_master_curve(a, x_curr, selected_size)
-
-        δ2_curr = (y_curr - Y_curr)^2 / (dy2_curr + dY2_curr)
-
-        res += (x_curr - x_prev) * (δ2_curr + δ2_prev) / 2
-
-        δ2_prev = δ2_curr
-        x_prev = x_curr
+    for (i, (y, dy2)) in enumerate(points)
+        i == skip && continue
+        weight = 1 / dy2
+        numerator += y * weight
+        denominator += weight
     end
+    return numerator / denominator, 1 / denominator
+end
 
-    return res / (hi - lo)
+function new_master_curve(a::Autoscaler, x, sz)
+    points = map(a.avail_sizes) do size
+        xs, ys, y_errs = scaled_data(a, size)
+
+        interpolate(xs, ys, y_errs, x; sq_errs=true)
+    end
+    if any(ismissing, points)
+        return (NaN, NaN)
+    else
+        return master_curve(points, a.use_all_sizes ? 0 : sz)
+    end
 end
 
 function new_cost_function(a::Autoscaler, params)
@@ -48,9 +49,39 @@ function new_cost_function(a::Autoscaler, params)
         return Inf
     end
 
-    res = 0.0
-    for size in a.avail_sizes
-        res += partial_cost_function(a, size, (lo, hi))
+    skip = !a.use_all_sizes
+
+    result = 0.0
+    curr_points = Points4(a, lo, hi)
+    first_x = curr_points[1].x
+    keep_going = next!(curr_points) # for integration, we skip the first point
+
+    last_x = curr_points[1].x
+    #= den=1 =#
+    while keep_going
+        prev_points = previous(curr_points)
+
+        curr_x = curr_points[1].x
+        prev_x = prev_points[1].x
+
+        for i in eachindex(curr_points)
+            #=
+            if curr_points[i].in_data
+                curr_δ2 = delta_squared(curr_points, i; skip)
+                prev_δ2 = delta_squared(prev_points, i; skip)
+                den += 1
+                result += curr_δ2
+            end
+            =#
+
+            curr_δ2 = delta_squared(curr_points, i; skip)
+            prev_δ2 = delta_squared(prev_points, i; skip)
+            result += (curr_x - prev_x) * (curr_δ2 + prev_δ2) ./ 2
+        end
+
+    last_x = curr_points[1].x
+        keep_going = next!(curr_points)
     end
-    return √(res / length(a.avail_sizes))
+    #return result / den
+    return result / length(curr_points) / (last_x - first_x)
 end
