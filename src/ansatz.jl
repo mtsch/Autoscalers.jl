@@ -45,6 +45,30 @@ function extract_params_and_split_x_and_y(expr)
     return x_scaling, y_scaling, Tuple(params)
 end
 
+"""
+    @ansatz expr1(y, L) ~ expr2(x, L)
+
+A scaling ansatz to use with [`Autoscaler`](@ref), where `x` and `y` are the variables to
+scale and `L` is the system size.
+
+`expr1` and `expr2` can be arbitrary expressions. Any variables that appear in these
+expressions will be exposed as parameters by [`Autoscaler`](@ref). For example, the ansatz
+`@ansatz L^b * y ~ L^a * (x - x_c)` has three parameters, `a`,`b`, and `x_c`:
+
+```julia
+a = @ansatz L^b * y ~ L^a * (x - x_c)
+a.param_names
+# (:a, :b, :x_c)
+```
+
+`x`, `y`, and `L` can be remapped to match your data by attaching `name => new_name` pairs
+to the end of the macro call. For example, if your data includes a column `system_size` that
+plays the role of `L`, you can remap it as
+
+```julia
+a = @ansatz L^b * y ~ L^a * (x - x_c) L => system_size
+```
+"""
 macro ansatz(expr, exprs...)
     orig_expr = deepcopy(expr)
 
@@ -71,7 +95,6 @@ macro ansatz(expr, exprs...)
     expr_left = replace_params!(expr_left, param_mapping)
     expr_right = replace_params!(expr_right, param_mapping)
 
-    # TODO is linear in y
     scale_y = quote
         function(y, L, params)
             return $expr_left
@@ -86,7 +109,7 @@ macro ansatz(expr, exprs...)
     remaps = Dict{Symbol,Symbol}()
     for expr in exprs
         if expr.args[1] ≢ :(=>)
-            throw(ArgumentError("extra arguments must be of the form"))
+            throw(ArgumentError("extra arguments must be of the form `:name => value`"))
         elseif expr.args[2] ∉ (:L, :x, :y, :y_err)
             throw(ArgumentError())
         else

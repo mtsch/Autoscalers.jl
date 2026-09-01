@@ -52,12 +52,11 @@ function new_cost_function(a::Autoscaler, params)
     skip = !a.use_all_sizes
 
     result = 0.0
-    curr_points = Points4(a, lo, hi)
+    curr_points = InplacePointIterator(a, lo, hi)
     first_x = curr_points[1].x
     keep_going = next!(curr_points) # for integration, we skip the first point
 
     last_x = curr_points[1].x
-    #= den=1 =#
     while keep_going
         prev_points = previous(curr_points)
 
@@ -65,15 +64,6 @@ function new_cost_function(a::Autoscaler, params)
         prev_x = prev_points[1].x
 
         for i in eachindex(curr_points)
-            #=
-            if curr_points[i].in_data
-                curr_δ2 = delta_squared(curr_points, i; skip)
-                prev_δ2 = delta_squared(prev_points, i; skip)
-                den += 1
-                result += curr_δ2
-            end
-            =#
-
             curr_δ2 = delta_squared(curr_points, i; skip)
             prev_δ2 = delta_squared(prev_points, i; skip)
             result += (curr_x - prev_x) * (curr_δ2 + prev_δ2) ./ 2
@@ -82,6 +72,5 @@ function new_cost_function(a::Autoscaler, params)
     last_x = curr_points[1].x
         keep_going = next!(curr_points)
     end
-    #return result / den
     return result / length(curr_points) / (last_x - first_x)
 end

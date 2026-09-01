@@ -1,11 +1,12 @@
 """
-
-
-# Usage
-
-```jldoctest
-
-```
+    Autoscaler(
+        table, ansatz::ScalingAnsatz=DEFAULT_ANSATZ;
+        x=:x, y=:y, y_err=:y_err, L=:L,
+        classic_cost_function=false,
+        use_all_sizes=false,
+        window_width=1,
+        kwargs...
+    )
 """
 struct Autoscaler{P,S<:ScalingAnsatz{P}}
     ansatz::S
@@ -101,38 +102,38 @@ function Autoscaler(
     return hardcode_params!(result; kwargs...)
 end
 
-function hardcode_params!(c::Autoscaler; kwargs...)
-    param_names = c.ansatz.param_names
-    hardcodes = c.hardcodes
+function hardcode_params!(a::Autoscaler; kwargs...)
+    param_names = a.ansatz.param_names
+    hardcodes = a.hardcodes
     for (i, p) in enumerate(param_names)
         hardcodes[i] = get(kwargs, p, NaN)
     end
-    return c
+    return a
 end
 
-function Base.show(io::IO, c::Autoscaler)
-    print(io, "AutoScaler(", c.ansatz, "...)")
+function Base.show(io::IO, a::Autoscaler)
+    print(io, "AutoScaler(", a.ansatz, "...)")
 end
 
-function transform!(c::Autoscaler, params)
-    for i in eachindex(c.x_val_scaled)
-        L, x, y, y_err = c.sizes[i], c.x_val_raw[i], c.y_val_raw[i], c.y_err_raw[i]
+function transform!(a::Autoscaler, params)
+    for i in eachindex(a.x_val_scaled)
+        L, x, y, y_err = a.sizes[i], a.x_val_raw[i], a.y_val_raw[i], a.y_err_raw[i]
 
-        c.x_val_scaled[i] = c.ansatz.scale_x(x, L, params)
+        a.x_val_scaled[i] = a.ansatz.scale_x(x, L, params)
 
-        y_measurement_scaled = c.ansatz.scale_y(y ± y_err, L, params)
-        c.y_val_scaled[i] = y_measurement_scaled.val
-        c.y_err_scaled[i] = y_measurement_scaled.err
+        y_measurement_scaled = a.ansatz.scale_y(y ± y_err, L, params)
+        a.y_val_scaled[i] = y_measurement_scaled.val
+        a.y_err_scaled[i] = y_measurement_scaled.err
     end
     return nothing
 end
 
-function scaled_data(c::Autoscaler, size)
-    range = c.size_map[size]
+function scaled_data(a::Autoscaler, size)
+    range = a.size_map[size]
     return (
-        x_val = view(c.x_val_scaled, range),
-        y_val = view(c.y_val_scaled, range),
-        y_err = view(c.y_err_scaled, range),
+        x_val = view(a.x_val_scaled, range),
+        y_val = view(a.y_val_scaled, range),
+        y_err = view(a.y_err_scaled, range),
     )
 end
 
@@ -171,74 +172,71 @@ function window(a::Autoscaler)
 end
 
 """
-    get_parameters(c::Autoscaler{N}, args)
+    get_parameters(a::Autoscaler{N}, args)
 
 Get the parameters `x_crit`, `a`, `b` taking hardcoded values into account. `args` must be
 of an appropriate length.
 """
-function get_parameters(c::Autoscaler, args)
-    expected = count(isnan, c.hardcodes)
+function get_parameters(a::Autoscaler, args)
+    expected = count(isnan, a.hardcodes)
     if length(args) ≠ expected
         throw(ArgumentError("expected $(expected) params, got $(length(args))"))
     end
 
-    params = c.last_params
-    param_names = c.ansatz.param_names
+    params = a.last_params
+    param_names = a.ansatz.param_names
 
     arg_idx = 1
     for i in eachindex(params)
         name = param_names[i]
-        if isnan(c.hardcodes[i])
+        if isnan(a.hardcodes[i])
             params[i] = args[arg_idx]
             arg_idx += 1
         else
-            params[i] = c.hardcodes[i]
+            params[i] = a.hardcodes[i]
         end
     end
 
     return params
 end
 
-function (c::Autoscaler)(params::Vector)
-    params = get_parameters(c, params)
-    return cost_function(c, params)
+function (a::Autoscaler)(params::Vector)
+    params = get_parameters(a, params)
+    return cost_function(a, params)
 end
-function (c::Autoscaler)(args::Vararg{<:Real})
-    params = get_parameters(c, args)
-    return cost_function(c, params)
+function (a::Autoscaler)(args::Vararg{<:Real})
+    params = get_parameters(a, args)
+    return cost_function(a, params)
 end
 
-function to_table(c::Autoscaler, args::Vararg{<:Real})
-    return to_table(c, args)
+function to_table(a::Autoscaler, args::Vararg{<:Real})
+    return to_table(a, args)
 end
-function to_table(c::Autoscaler, args::Union{Vector,Tuple})
-    params = get_parameters(c, args)
-    transform!(c, params)
-    if c.classic_cost_function
+function to_table(a::Autoscaler, args::Union{Vector,Tuple})
+    params = get_parameters(a, args)
+    transform!(a, params)
+    if a.classic_cost_function
         master_curve = [
-            standard_master_curve(c, x, size) for (x, size) in zip(c.x_val_scaled, c.sizes)
+            standard_master_curve(a, x, size) for (x, size) in zip(a.x_val_scaled, a.sizes)
         ]
     else
         master_curve = [
-            new_master_curve(c, x, size) for (x, size) in zip(c.x_val_scaled, c.sizes)
+            new_master_curve(a, x, size) for (x, size) in zip(a.x_val_scaled, a.sizes)
         ]
     end
     return (;
-        L=copy(c.sizes),
-        x=copy(c.x_val_scaled),
-        y=copy(c.y_val_scaled),
-        y_err=copy(c.y_err_scaled),
+        L=copy(a.sizes),
+        x=copy(a.x_val_scaled),
+        y=copy(a.y_val_scaled),
+        y_err=copy(a.y_err_scaled),
         master_curve,
     )
 end
 
-
-
-function cost_function(c::Autoscaler, params)
-    if c.classic_cost_function
-        return standard_cost_function(c, params)
+function cost_function(a::Autoscaler, params)
+    if a.classic_cost_function
+        return standard_cost_function(a, params)
     else
-        return new_cost_function(c, params)
-        #return better_cost_function(c, params)
+        return new_cost_function(a, params)
     end
 end

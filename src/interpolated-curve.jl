@@ -74,9 +74,6 @@ Base.IteratorSize(::LerpIterator) = Base.SizeUnknown()
 Interpolate `x_vals`, `y_vals`, and squared `y_errs` at point `curr_x` with help from the
 iterator `state`.
 """
-#@inline lerp_points(::Tuple{}, ::Tuple{}, ::Tuple{}, ::Tuple{}, _) = ()
-#@inline function lerp_points((i, is...), (x, xs...), (y, ys...), (dy, dys...), curr_x)
-#end
 function lerp_points(indices, xs, ys, dys, curr_x)
     return map(zip(indices, xs, ys, dys)) do (i, x, y, dy)
         x_stop = x[i]
@@ -102,10 +99,6 @@ end
 
 Determine whether `LerpIterator` with `state` and `x_vals` should stop.
 """
-#@inline should_stop(::Tuple{}, ::Tuple{}) = false
-#@inline function should_stop((i, is...), (x, xs...))
-#    return i > length(x) || should_stop(is, xs)
-#end
 function should_stop(indices, xs)
     return any(zip(indices, xs)) do (i, x)
         i > length(x)
@@ -117,10 +110,6 @@ end
 
 Find the minimum `x_vals` in the `state`.
 """
-#@inline min_x_val(::Tuple{}, ::Tuple{}) = Inf
-#@inline function min_x_val((i, is...), (x, xs...))
-#    return min(x[i], min_x_val(is, xs))
-#end
 function min_x_val(indices, xs)
     return minimum(zip(xs, indices)) do (x, i)
         x[i]
@@ -132,13 +121,6 @@ end
 
 Find the next `state` for a `LerpIterator` whith `x_vals`.
 """
-#@inline next_state(::Tuple{}, ::Tuple{}, _) = ()
-#@inline function next_state((i, is...), (x, xs...), curr_x)
-#    if x[i] == curr_x
-#        i += 1
-#    end
-#    return (i, next_state(is, xs, curr_x)...)
-#end
 function next_state(indices, xs, curr_x)
     for i in eachindex(indices)
         indices[i] += (xs[indices[i]] == curr_x)
@@ -186,7 +168,9 @@ end
 ###
 ###
 ###
-struct Points4 <: AbstractVector{@NamedTuple{L::Int,in_data::Bool,x::Float64,y::Float64,dy2::Float64}}
+struct InplacePointIterator <: AbstractVector{
+    @NamedTuple{L::Int,in_data::Bool,x::Float64,y::Float64,dy2::Float64}
+}
     scaler::Autoscaler
     curr_x::Base.RefValue{Float64}
     curr_indices::Vector{Int}
@@ -194,17 +178,17 @@ struct Points4 <: AbstractVector{@NamedTuple{L::Int,in_data::Bool,x::Float64,y::
     prev_indices::Vector{Int}
     hi::Float64
 end
-function Points4(a::Autoscaler, lo, hi)
+function InplacePointIterator(a::Autoscaler, lo, hi)
     curr_indices = map(a.avail_sizes) do l
         x_val = scaled_data(a, l).x_val
         findfirst(≥(lo), x_val)
     end
-    return Points4(a, Ref(lo), curr_indices, Ref(-Inf), fill(0, length(curr_indices)), hi)
+    return InplacePointIterator(a, Ref(lo), curr_indices, Ref(-Inf), fill(0, length(curr_indices)), hi)
 end
 
-Base.size(p::Points4) = (length(p.scaler.avail_sizes),)
+Base.size(p::InplacePointIterator) = (length(p.scaler.avail_sizes),)
 
-function Base.getindex(p::Points4, index)
+function Base.getindex(p::InplacePointIterator, index)
     0 ≤ index ≤ length(p) || throw(BoundsError(p, index))
     position = p.curr_indices[index]
 
@@ -226,7 +210,7 @@ function Base.getindex(p::Points4, index)
     (; L=p.scaler.avail_sizes[index], in_data=x_start == x_stop, x=p.curr_x[], y, dy2)
 end
 
-function next!(p::Points4)
+function next!(p::InplacePointIterator)
     if p.curr_x[] ≥ p.hi
         p.curr_indices .= 0
         return false
@@ -251,11 +235,11 @@ function next!(p::Points4)
     return true
 end
 
-function previous(p::Points4)
-    return Points4(p.scaler, p.prev_x, p.prev_indices, p.curr_x, p.curr_indices, p.hi)
+function previous(p::InplacePointIterator)
+    return InplacePointIterator(p.scaler, p.prev_x, p.prev_indices, p.curr_x, p.curr_indices, p.hi)
 end
 
-function delta_squared(points::Points4, index; skip=false)
+function delta_squared(points::InplacePointIterator, index; skip=false)
     (; y, dy2) = points[index]
 
     num = den = 0.0
