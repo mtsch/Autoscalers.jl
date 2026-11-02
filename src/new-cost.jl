@@ -25,7 +25,7 @@ function master_curve(points, skip)
     return numerator / denominator, 1 / denominator
 end
 
-function new_master_curve(a::Autoscaler, x, sz)
+function new_master_curve(a::Autoscaler, x, sz; skip=a.use_all_sizes)
     points = map(a.avail_sizes) do size
         xs, ys, y_errs = scaled_data(a, size)
 
@@ -34,11 +34,11 @@ function new_master_curve(a::Autoscaler, x, sz)
     if any(ismissing, points)
         return (NaN, NaN)
     else
-        return master_curve(points, a.use_all_sizes ? 0 : sz)
+        return master_curve(points, skip ? 0 : sz)
     end
 end
 
-function new_cost_function(a::Autoscaler, params)
+function new_cost_function_old(a::Autoscaler, params)
     transform!(a, params)
     lo, hi = window(a)
 
@@ -69,8 +69,33 @@ function new_cost_function(a::Autoscaler, params)
             result += (curr_x - prev_x) * (curr_δ2 + prev_δ2) ./ 2
         end
 
-    last_x = curr_points[1].x
+        last_x = curr_points[1].x
         keep_going = next!(curr_points)
     end
     return result / length(curr_points) / (last_x - first_x)
+end
+function new_cost_function(a::Autoscaler, params)
+    transform!(a, params)
+    lo, hi = window(a)
+    lo > hi && return 1e12 * (lo - hi)
+    hi == lo && return Inf
+
+    skip = !a.use_all_sizes
+
+    knots = all_knots(a, lo, hi)
+    result = 0.0
+
+    prev_pts = [(0.0, 0.0) for _ in eachindex(a.avail_sizes)]
+    curr_pts = [(0.0, 0.0) for _ in eachindex(a.avail_sizes)]
+
+    for (prev_x, curr_x) in zip(knots, Iterators.drop(knots, 1))
+        points_at!(prev_pts, a, prev_x)
+        points_at!(curr_pts, a, curr_x)
+        for i in eachindex(curr_pts)
+            curr_δ2 = delta_squared(curr_pts, i; skip)
+            prev_δ2 = delta_squared(prev_pts, i; skip)
+            result += (curr_x - prev_x) * (curr_δ2 + prev_δ2) / 2
+        end
+    end
+    return result / length(a.avail_sizes) / (knots[end] - knots[1])
 end

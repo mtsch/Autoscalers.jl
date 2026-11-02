@@ -86,7 +86,6 @@ macro ansatz(expr, exprs...)
 
     left_vars = get_variables(expr_left, [])
     :y ∉ left_vars && throw(ArgumentError("y should appear in the left-hand side"))
-    :x ∈ left_vars && throw(ArgumentError("x should not appear in the left-hand side"))
 
     right_vars = get_variables(expr_right, [])
     :x ∉ right_vars && throw(ArgumentError("x should appear in the right-hand side"))
@@ -96,7 +95,7 @@ macro ansatz(expr, exprs...)
     expr_right = replace_params!(expr_right, param_mapping)
 
     scale_y = quote
-        function(y, L, params)
+        function(x, y, L, params)
             return $expr_left
         end
     end

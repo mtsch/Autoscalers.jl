@@ -44,6 +44,23 @@ function interpolate(x, y, y_err, selected_x; sq_errs=false)
     end
 end
 
+function all_knots(a::Autoscaler, lo, hi)
+    knots = filter(x -> lo ≤ x ≤ hi, a.x_val_scaled)
+    append!(knots, (lo, hi))
+    unique!(knots)
+    sort!(knots)
+    return knots
+end
+function points_at!(dst, a::Autoscaler, x)
+    @boundscheck if length(dst) ≠ length(a.avail_sizes)
+        throw(BoundsError("bad length of `dst`"))
+    end
+    for (i, L) in enumerate(a.avail_sizes)
+        xs, ys, y_errs = scaled_data(a, L)
+        dst[i] = interpolate(xs, ys, y_errs, x; sq_errs=true)
+    end
+end
+
 """
     LerpIterator(a::Autoscaler, lo, hi)
 
@@ -168,10 +185,10 @@ end
 ###
 ###
 ###
-struct InplacePointIterator <: AbstractVector{
+struct InplacePointIterator{A<:Autoscaler} <: AbstractVector{
     @NamedTuple{L::Int,in_data::Bool,x::Float64,y::Float64,dy2::Float64}
 }
-    scaler::Autoscaler
+    scaler::A
     curr_x::Base.RefValue{Float64}
     curr_indices::Vector{Int}
     prev_x::Base.RefValue{Float64}
@@ -247,6 +264,19 @@ function delta_squared(points::InplacePointIterator, index; skip=false)
         skip && i == index && continue
         weight = 1 / p.dy2
         num += p.y * weight
+        den += weight
+    end
+    Y = num / den
+    return (y - Y)^2 / dy2
+end
+function delta_squared(points::Vector{Tuple{Float64,Float64}}, index; skip=false)
+    y, dy2 = points[index]
+
+    num = den = 0.0
+    for (i, (p_y, p_dy2)) in enumerate(points)
+        skip && i == index && continue
+        weight = 1 / p_dy2
+        num += p_y * weight
         den += weight
     end
     Y = num / den

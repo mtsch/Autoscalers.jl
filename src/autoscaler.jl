@@ -121,7 +121,7 @@ function transform!(a::Autoscaler, params)
 
         a.x_val_scaled[i] = a.ansatz.scale_x(x, L, params)
 
-        y_measurement_scaled = a.ansatz.scale_y(y ± y_err, L, params)
+        y_measurement_scaled = a.ansatz.scale_y(x, y ± y_err, L, params)
         a.y_val_scaled[i] = y_measurement_scaled.val
         a.y_err_scaled[i] = y_measurement_scaled.err
     end
