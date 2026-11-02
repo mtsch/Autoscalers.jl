@@ -5,8 +5,28 @@
         classic_cost_function=false,
         use_all_sizes=false,
         window_width=1,
-        kwargs...
+        eval_window=nothing,
+        penalty=100.0,
+        params...
     )
+
+Prepare `table` for finite-size scaling with `ansatz`. Calling the result with the free
+parameters (in the order of `ansatz.param_names`, skipping hardcoded ones) returns the cost.
+
+* `x`, `y`, `y_err`, `L`: column names. Defaults are taken from the remaps of `ansatz`.
+* `classic_cost_function`: use the Houdayer–Hartmann cost (per-point, local linear master
+  curve) instead of the integral cost.
+* `use_all_sizes`: include a curve's own size when building the master curve it is compared
+  to (default: leave it out).
+* `window_width`: fraction of the scaled overlap window used by the integral cost.
+* `eval_window = (lo, hi)`: use the fixed-window cost. Only data points with
+  `lo ≤ x ≤ hi` in the *raw* (unscaled) `x` are scored, independently of the parameters.
+  Points outside it still serve as interpolation knots. Where another size does not cover a
+  point's scaled `x`, its curve is extrapolated linearly and a smooth penalty `penalty * d^2`
+  is added (`d` = distance outside, in units of that size's scaled range).
+* `params...`: hardcode parameters by name, e.g. `a = 1/ν`.
+
+Rows with zero error are skipped with a warning.
 """
 struct Autoscaler{P,S<:ScalingAnsatz{P}}
     ansatz::S
@@ -23,7 +43,7 @@ struct Autoscaler{P,S<:ScalingAnsatz{P}}
     avail_sizes::Vector{Int}
     size_map::Dict{Int,UnitRange{Int}}
 
-    # TODO: remove me?
+    # Scratch space for the classic cost function.
     selected_x_val::Vector{Float64}
     selected_y_val::Vector{Float64}
     selected_y_err::Vector{Float64}
@@ -35,18 +55,36 @@ struct Autoscaler{P,S<:ScalingAnsatz{P}}
     use_all_sizes::Bool
 
     window_width::Float64
+
+    eval_window::Union{Nothing,Tuple{Float64,Float64}}
+    eval_mask::BitVector
+    penalty::Float64
 end
-function Autoscaler(ansatz::ScalingAnsatz=DEFAULT_ANSATZ; x, y, y_err, L, kwargs...)
-    return Autoscaler(x, y, y_err, size)
-end
+
 function Autoscaler(
     table, ansatz::ScalingAnsatz=DEFAULT_ANSATZ;
-    x=:x, y=:y, y_err=:y_err, L=:L,
+    x=nothing, y=nothing, y_err=nothing, L=nothing,
     classic_cost_function=false,
     use_all_sizes=false,
     window_width=1,
+    eval_window=nothing,
+    penalty=100.0,
     kwargs...
 )
+    x = something(x, get(ansatz.remaps, :x, :x))
+    y = something(y, get(ansatz.remaps, :y, :y))
+    y_err = something(y_err, get(ansatz.remaps, :y_err, :y_err))
+    L = something(L, get(ansatz.remaps, :L, :L))
+
+    for (k, _) in kwargs
+        if k ∉ ansatz.param_names
+            throw(ArgumentError("unrecognized keyword argument `$k`"))
+        end
+    end
+    if !isnothing(eval_window) && classic_cost_function
+        throw(ArgumentError("`eval_window` and `classic_cost_function` are mutually exclusive"))
+    end
+    0 < window_width ≤ 1 || throw(ArgumentError("`window_width` must be in (0, 1]"))
 
     rows = collect(Tables.rows(table))
     sort!(rows, by=r -> (r[L], r[x]))
@@ -58,18 +96,12 @@ function Autoscaler(
     avail_sizes = Int[]
     size_map = Dict{Int,UnitRange{Int}}()
 
-    for (k, _) in kwargs
-        if k ∉ ansatz.param_names
-            throw(ArgumentError("unrecognized keyword argument `$k`"))
-        end
-    end
-
     prev_size = -1
     start_index = 0
     i = 0
     for row in rows
         if iszero(row[y_err])
-            @warn "Some data points have zero errors. Skipping." maxlog=1
+            @warn "Some data points have zero errors. Skipping." maxlog = 1
             continue
         end
         i += 1
@@ -77,7 +109,7 @@ function Autoscaler(
         curr_size = row[L]
         if curr_size ≠ prev_size
             if prev_size > 0
-                size_map[prev_size] = start_index:(i - 1)
+                size_map[prev_size] = start_index:(i-1)
             end
             push!(avail_sizes, curr_size)
             prev_size = curr_size
@@ -88,7 +120,27 @@ function Autoscaler(
         push!(y_err_raw, row[y_err])
         push!(sizes, row[L])
     end
+    isempty(avail_sizes) && throw(ArgumentError("no usable data"))
+    length(avail_sizes) ≥ 2 || throw(ArgumentError("need at least two system sizes"))
     size_map[prev_size] = start_index:length(x_val_raw)
+
+    # The mask is built here, after sorting and dropping zero-error rows, so its indices
+    # always match the internal arrays.
+    if isnothing(eval_window)
+        ew = nothing
+        eval_mask = trues(length(x_val_raw))
+    else
+        ew = (Float64(eval_window[1]), Float64(eval_window[2]))
+        ew[1] < ew[2] || throw(ArgumentError("`eval_window` must satisfy lo < hi"))
+        eval_mask = BitVector(ew[1] .≤ x_val_raw .≤ ew[2])
+        for l in avail_sizes
+            if !any(view(eval_mask, size_map[l]))
+                @warn "System size L=$l has no data points inside `eval_window`; " *
+                      "it will only be used for interpolation."
+            end
+        end
+        any(eval_mask) || throw(ArgumentError("no data points inside `eval_window`"))
+    end
 
     result = Autoscaler(
         ansatz,
@@ -98,21 +150,27 @@ function Autoscaler(
         Float64[], Float64[], Float64[],
         fill(NaN, length(ansatz.param_names)), zeros(length(ansatz.param_names)),
         classic_cost_function, use_all_sizes, Float64(window_width),
+        ew, eval_mask, Float64(penalty),
     )
     return hardcode_params!(result; kwargs...)
 end
 
 function hardcode_params!(a::Autoscaler; kwargs...)
-    param_names = a.ansatz.param_names
-    hardcodes = a.hardcodes
-    for (i, p) in enumerate(param_names)
-        hardcodes[i] = get(kwargs, p, NaN)
+    for (i, p) in enumerate(a.ansatz.param_names)
+        a.hardcodes[i] = get(kwargs, p, NaN)
     end
     return a
 end
 
-function Base.show(io::IO, a::Autoscaler)
-    print(io, "AutoScaler(", a.ansatz, "...)")
+Base.show(io::IO, a::Autoscaler) = print(io, "Autoscaler(", a.ansatz, ")")
+
+"""
+    free_parameter_names(a::Autoscaler)
+
+Names of the parameters that are not hardcoded, in the order the cost function expects them.
+"""
+function free_parameter_names(a::Autoscaler)
+    return Tuple(p for (p, h) in zip(a.ansatz.param_names, a.hardcodes) if isnan(h))
 end
 
 function transform!(a::Autoscaler, params)
@@ -121,9 +179,9 @@ function transform!(a::Autoscaler, params)
 
         a.x_val_scaled[i] = a.ansatz.scale_x(x, L, params)
 
-        y_measurement_scaled = a.ansatz.scale_y(x, y ± y_err, L, params)
-        a.y_val_scaled[i] = y_measurement_scaled.val
-        a.y_err_scaled[i] = y_measurement_scaled.err
+        y_scaled = a.ansatz.scale_y(x, y ± y_err, L, params)
+        a.y_val_scaled[i] = Measurements.value(y_scaled)
+        a.y_err_scaled[i] = Measurements.uncertainty(y_scaled)
     end
     return nothing
 end
@@ -131,17 +189,23 @@ end
 function scaled_data(a::Autoscaler, size)
     range = a.size_map[size]
     return (
-        x_val = view(a.x_val_scaled, range),
-        y_val = view(a.y_val_scaled, range),
-        y_err = view(a.y_err_scaled, range),
+        x_val=view(a.x_val_scaled, range),
+        y_val=view(a.y_val_scaled, range),
+        y_err=view(a.y_err_scaled, range),
     )
 end
 
+"""
+    window(a::Autoscaler)
+
+Overlap of the scaled `x` ranges of all sizes, shrunk to a fraction `a.window_width`
+(shrinking the side further from zero first). Used by the integral cost function.
+"""
 function window(a::Autoscaler)
     lo = -Inf
     hi = Inf
     for size in a.avail_sizes
-        x_scaled = scaled_data(a, size)[1]
+        x_scaled = scaled_data(a, size).x_val
         lo = max(lo, first(x_scaled))
         hi = min(hi, last(x_scaled))
     end
@@ -149,33 +213,29 @@ function window(a::Autoscaler)
         return lo, hi
     end
     if a.window_width ≠ 1
-        window = hi - lo
-        desired_window = window * a.window_width
-        to_shrink = window - desired_window
+        width = hi - lo
+        to_shrink = width * (1 - a.window_width)
 
-        # shrink the larger part first
         diff = abs(hi) - abs(lo)
         if diff < 0
-            lo += min(-diff, to_shrink)
-            to_shrink -= min(-diff, to_shrink)
+            step = min(-diff, to_shrink)
+            lo += step
         else
-            hi -= min(diff, to_shrink)
-            to_shrink -= min(diff, to_shrink)
+            step = min(diff, to_shrink)
+            hi -= step
         end
+        to_shrink -= step
 
         lo += to_shrink / 2
         hi -= to_shrink / 2
-        @assert hi - lo ≈ desired_window
     end
-
     return lo, hi
 end
 
 """
-    get_parameters(a::Autoscaler{N}, args)
+    get_parameters(a::Autoscaler, args)
 
-Get the parameters `x_crit`, `a`, `b` taking hardcoded values into account. `args` must be
-of an appropriate length.
+Combine the free parameters `args` with the hardcoded ones into the full parameter vector.
 """
 function get_parameters(a::Autoscaler, args)
     expected = count(isnan, a.hardcodes)
@@ -184,11 +244,8 @@ function get_parameters(a::Autoscaler, args)
     end
 
     params = a.last_params
-    param_names = a.ansatz.param_names
-
     arg_idx = 1
     for i in eachindex(params)
-        name = param_names[i]
         if isnan(a.hardcodes[i])
             params[i] = args[arg_idx]
             arg_idx += 1
@@ -196,45 +253,47 @@ function get_parameters(a::Autoscaler, args)
             params[i] = a.hardcodes[i]
         end
     end
-
     return params
 end
 
-function (a::Autoscaler)(params::Vector)
-    params = get_parameters(a, params)
-    return cost_function(a, params)
-end
-function (a::Autoscaler)(args::Vararg{<:Real})
-    params = get_parameters(a, args)
-    return cost_function(a, params)
-end
+(a::Autoscaler)(params::AbstractVector) = cost_function(a, get_parameters(a, params))
+(a::Autoscaler)(args::Vararg{Real}) = cost_function(a, get_parameters(a, args))
 
-function to_table(a::Autoscaler, args::Vararg{<:Real})
-    return to_table(a, args)
-end
-function to_table(a::Autoscaler, args::Union{Vector,Tuple})
+"""
+    to_table(a::Autoscaler, args...)
+
+Scale the data with the free parameters `args` and return a named tuple of columns
+`L`, `x`, `y`, `y_err` (scaled), `master_curve` (value of the master curve the point is
+compared to), and `in_window` (whether the point is scored by the fixed-window cost).
+"""
+to_table(a::Autoscaler, args::Vararg{Real}) = to_table(a, args)
+function to_table(a::Autoscaler, args::Union{AbstractVector,Tuple})
     params = get_parameters(a, args)
     transform!(a, params)
-    if a.classic_cost_function
-        master_curve = [
-            standard_master_curve(a, x, size) for (x, size) in zip(a.x_val_scaled, a.sizes)
-        ]
+    if !isnothing(a.eval_window)
+        master = [fixed_master_curve(a, x, L).Y for (x, L) in zip(a.x_val_scaled, a.sizes)]
+    elseif a.classic_cost_function
+        master = map(zip(a.x_val_scaled, a.sizes)) do (x, L)
+            m = standard_master_curve(a, x, L)
+            ismissing(m) ? NaN : m[1]
+        end
     else
-        master_curve = [
-            new_master_curve(a, x, size) for (x, size) in zip(a.x_val_scaled, a.sizes)
-        ]
+        master = [first(new_master_curve(a, x, L)) for (x, L) in zip(a.x_val_scaled, a.sizes)]
     end
     return (;
         L=copy(a.sizes),
         x=copy(a.x_val_scaled),
         y=copy(a.y_val_scaled),
         y_err=copy(a.y_err_scaled),
-        master_curve,
+        master_curve=master,
+        in_window=copy(a.eval_mask),
     )
 end
 
 function cost_function(a::Autoscaler, params)
-    if a.classic_cost_function
+    if !isnothing(a.eval_window)
+        return fixed_window_cost(a, params)
+    elseif a.classic_cost_function
         return standard_cost_function(a, params)
     else
         return new_cost_function(a, params)
