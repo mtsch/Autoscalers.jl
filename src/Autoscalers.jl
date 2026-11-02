@@ -2,13 +2,14 @@ module Autoscalers
 
 using Tables
 using Measurements
-export Autoscaler, to_table, @ansatz
+
+export Autoscaler, @ansatz, to_table, cost_breakdown
 
 include("ansatz.jl")
 include("autoscaler.jl")
-include("interpolated-curve.jl")
-
-include("new-cost.jl")
-include("old-cost.jl")
+include("interpolation.jl")
+include("cost-integral.jl")
+include("cost-classic.jl")
+include("cost-fixed-window.jl")
 
 end

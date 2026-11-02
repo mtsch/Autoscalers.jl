@@ -1,0 +1,394 @@
+using Autoscalers
+using Autoscalers: lerp, interpolate, extrapolate, master_curve, get_parameters,
+    free_parameter_names, window, transform!
+using Optim
+using Random
+using Test
+
+###
+### Helpers
+###
+
+"""
+    synthetic(g; sizes, xs, σ, rng)
+
+Synthetic data set: `y = g(L, x)` for each `L` in `sizes` and `x` in `xs`, with constant
+error bars `σ`. If `rng` is given, Gaussian noise of width `σ` is added.
+"""
+function synthetic(g; sizes=[8, 12, 16, 24, 32], xs, σ=1e-3, rng=nothing)
+    L = Int[]
+    x = Float64[]
+    y = Float64[]
+    for l in sizes, xi in xs
+        push!(L, l)
+        push!(x, xi)
+        push!(y, g(l, xi) + (isnothing(rng) ? 0.0 : σ * randn(rng)))
+    end
+    return (; L, x, y, y_err=fill(σ, length(x)))
+end
+
+"""
+    fit(scaler, x0)
+
+Minimise the cost with Nelder–Mead, restarting once from the result.
+"""
+function fit(scaler, x0)
+    opts = Optim.Options(iterations=20_000, g_tol=1e-14)
+    res = optimize(p -> scaler(p), float.(x0), NelderMead(), opts)
+    res = optimize(p -> scaler(p), Optim.minimizer(res), NelderMead(), opts)
+    return Optim.minimizer(res), Optim.minimum(res)
+end
+
+std_(v) = sqrt(sum(abs2, v .- sum(v) / length(v)) / (length(v) - 1))
+
+const COSTS = [
+    "integral" => (;),
+    "classic" => (; classic_cost_function=true),
+]
+
+@testset "Autoscalers" begin
+
+###
+### Unit tests
+###
+
+@testset "interpolation" begin
+    @test lerp((0.0, 0.0), (1.0, 2.0), 0.25) ≈ 0.5
+    @test lerp((0.0, 0.0), (1.0, 2.0), 2.0) ≈ 4.0      # extrapolates
+    @test lerp((1.0, 3.0), (1.0, 5.0), 1.0) == 3.0     # degenerate segment
+
+    xs = [0.0, 1.0, 2.0]
+    ys = [0.0, 1.0, 4.0]
+    es = [0.1, 0.2, 0.3]
+    @test interpolate(xs, ys, es, 1.0) == (1.0, 0.2)                # knot
+    @test interpolate(xs, ys, es, 1.0; sq_errs=true)[2] ≈ 0.04
+    y, e = interpolate(xs, ys, es, 1.5)
+    @test y ≈ 2.5
+    @test e ≈ 0.25
+    @test interpolate(xs, ys, es, 1.5; sq_errs=true)[2] ≈ (0.04 + 0.09) / 2
+    @test ismissing(interpolate(xs, ys, es, -0.1))
+    @test ismissing(interpolate(xs, ys, es, 2.1))
+
+    # extrapolate agrees with interpolate inside and is continuous at the edges
+    @test extrapolate(xs, ys, es, 1.5)[1:2] == interpolate(xs, ys, es, 1.5; sq_errs=true)
+    @test extrapolate(xs, ys, es, 1.5)[3] == 0
+    for edge in (0.0, 2.0), ε in (1e-9, -1e-9)
+        y0, dy0, _ = extrapolate(xs, ys, es, edge)
+        y1, dy1, d = extrapolate(xs, ys, es, edge + ε)
+        @test y1 ≈ y0 atol = 1e-8
+        @test dy1 ≈ dy0 atol = 1e-8
+        @test d ≤ 1e-9
+    end
+    @test all(extrapolate(xs, ys, es, 3.0) .≈ (7.0, 0.09, 0.5))   # slope 3, d = 1/2
+    @test all(extrapolate(xs, ys, es, -1.0) .≈ (-1.0, 0.01, 0.5))
+    @test_throws ArgumentError extrapolate([0.0], [0.0], [1.0], 0.0)
+
+    # master curve: inverse-variance weighting, optional skip
+    pts = [(1.0, 1.0), (3.0, 1.0), (10.0, 0.25)]
+    Y, dY2 = master_curve(pts, 0)
+    @test Y ≈ (1 + 3 + 40) / 6
+    @test dY2 ≈ 1 / 6
+    @test master_curve(pts, 3) == (2.0, 0.5)
+end
+
+@testset "@ansatz" begin
+    a = @ansatz L^b * y ~ L^a * (x - x_c)
+    @test a.param_names == (:a, :b, :x_c)
+    @test a.scale_x(2.0, 4, [0.5, 1.0, 1.0]) ≈ 2.0
+    @test a.scale_y(0.0, 3.0, 4, [0.5, 1.0, 1.0]) ≈ 12.0
+    @test sprint(show, a) == "@ansatz(L ^ b * y ~ L ^ a * (x - x_c))"
+
+    # x on the left-hand side (analytic background)
+    bg = @ansatz L^b * (y - A - B * (x - x_c)) ~ L^a * (x - x_c)
+    @test bg.param_names == (:A, :B, :a, :b, :x_c)
+    @test bg.scale_y(2.0, 10.0, 1, [1.0, 2.0, 0.0, 0.0, 1.0]) ≈ 10 - 1 - 2
+
+    # numeric literals are not parameters
+    fixed = @ansatz L^0.5 * y ~ L^1.5 * (x - x_c)
+    @test fixed.param_names == (:x_c,)
+
+    # remaps
+    r = @ansatz L^b * y ~ L^a * (x - x_c) L => size x => t
+    @test r.remaps == Dict(:L => :size, :x => :t)
+
+    # malformed input
+    @test_throws ArgumentError @macroexpand @ansatz L^b * y + L^a * x
+    @test_throws ArgumentError @macroexpand @ansatz L^b ~ L^a * (x - x_c)
+    @test_throws ArgumentError @macroexpand @ansatz L^b * y ~ L^a * x_c
+    @test_throws ArgumentError @macroexpand @ansatz L^b * y ~ L^a * (x - y)
+    @test_throws ArgumentError @macroexpand @ansatz L^b * y ~ L^a * x z => w
+    @test_throws ArgumentError @macroexpand @ansatz L^b * y ~ L^a * x L
+end
+
+@testset "Autoscaler construction" begin
+    data = synthetic((L, x) -> x; sizes=[4, 6], xs=0:0.1:1)
+
+    s = Autoscaler(data)
+    @test s.avail_sizes == [4, 6]
+    @test s.size_map == Dict(4 => 1:11, 6 => 12:22)
+    @test free_parameter_names(s) == (:a, :b, :x_c)
+    @test sprint(show, s) == "Autoscaler(@ansatz(L ^ b * y ~ L ^ a * (x - x_c)))"
+
+    # rows are sorted by (L, x) regardless of input order
+    perm = randperm(Xoshiro(1), length(data.x))
+    shuffled = map(v -> v[perm], data)
+    s2 = Autoscaler(shuffled)
+    @test s2.x_val_raw == s.x_val_raw
+    @test s2.sizes == s.sizes
+
+    # zero-error rows are dropped with a warning, and the eval mask stays aligned
+    bad = (; L=data.L, x=data.x, y=data.y, y_err=copy(data.y_err))
+    bad.y_err[[1, 2, 15]] .= 0
+    s3 = @test_logs (:warn, r"zero errors") match_mode = :any Autoscaler(
+        bad; eval_window=(0.25, 0.75)
+    )
+    @test length(s3.x_val_raw) == 19
+    @test length(s3.eval_mask) == 19
+    @test all(0.25 .≤ s3.x_val_raw[s3.eval_mask] .≤ 0.75)
+    @test count(s3.eval_mask) == 9
+
+    # hardcoded parameters
+    s4 = Autoscaler(data; a=1.5)
+    @test free_parameter_names(s4) == (:b, :x_c)
+    @test get_parameters(s4, [0.1, 0.2]) == [1.5, 0.1, 0.2]
+    @test_throws ArgumentError get_parameters(s4, [0.1])
+    @test_throws ArgumentError s4(0.1)
+
+    # remapped column names come from the ansatz
+    renamed = (; size=data.L, t=data.x, val=data.y, val_err=data.y_err)
+    ans = @ansatz L^b * y ~ L^a * (x - x_c) L => size x => t y => val y_err => val_err
+    s5 = Autoscaler(renamed, ans)
+    @test s5.x_val_raw == s.x_val_raw
+    # explicit keywords override the remaps
+    s6 = Autoscaler(renamed; L=:size, x=:t, y=:val, y_err=:val_err)
+    @test s6.y_val_raw == s.y_val_raw
+
+    # invalid input
+    @test_throws ArgumentError Autoscaler(data; c=1.0)
+    @test_throws ArgumentError Autoscaler(synthetic((L, x) -> x; sizes=[4], xs=0:0.1:1))
+    @test_throws ArgumentError Autoscaler(data; eval_window=(2.0, 3.0))
+    @test_throws ArgumentError Autoscaler(data; eval_window=(0.5, 0.4))
+    @test_throws ArgumentError Autoscaler(
+        data; eval_window=(0.2, 0.4), classic_cost_function=true
+    )
+    @test_throws ArgumentError Autoscaler(data; window_width=0)
+    @test_logs (:warn, r"L=6 has no data") Autoscaler(
+        synthetic((L, x) -> x; sizes=[4, 6], xs=0:0.1:1) |>
+        d -> (; L=d.L, x=d.x .+ (d.L .== 6) .* 10, y=d.y, y_err=d.y_err);
+        eval_window=(0.0, 1.0),
+    )
+end
+
+@testset "window" begin
+    data = synthetic((L, x) -> x; sizes=[4, 6], xs=-1:0.1:3)
+    s = Autoscaler(data; window_width=0.5)
+    transform!(s, [0.0, 0.0, 0.0])
+    lo, hi = window(s)
+    # width 4 shrunk to 2; the side further from zero (hi) is shrunk first
+    @test hi - lo ≈ 2
+    @test (lo, hi) == (-1.0, 1.0)
+    s = Autoscaler(data)
+    transform!(s, [0.0, 0.0, 0.0])
+    @test window(s) == (-1.0, 3.0)
+end
+
+@testset "to_table and cost_breakdown" begin
+    g(L, x) = tanh(L * (x - 0.5))
+    data = synthetic(g; sizes=[4, 6, 8], xs=0:0.02:1)
+    for kw in ((;), (; classic_cost_function=true), (; eval_window=(0.4, 0.6)))
+        s = Autoscaler(data; kw...)
+        t = to_table(s, 1.0, 0.0, 0.5)
+        @test keys(t) == (:L, :x, :y, :y_err, :master_curve, :in_window)
+        @test length(t.x) == length(data.x)
+        @test t.x ≈ s.sizes .* (s.x_val_raw .- 0.5)
+        @test to_table(s, [1.0, 0.0, 0.5]).y == t.y
+        inner = abs.(t.x) .< 1
+        @test all(isfinite, t.master_curve[inner])
+        @test maximum(abs, (t.y.-t.master_curve)[inner]) < 0.05
+    end
+    # the master curve a point is compared to must leave out its own size
+    two = (; L=[4, 4, 4, 6, 6, 6], x=[0.0, 0.5, 1.0, 0.0, 0.5, 1.0],
+             y=[0.0, 0.0, 0.0, 1.0, 1.0, 1.0], y_err=fill(0.1, 6))
+    for kw in ((;), (; classic_cost_function=true), (; eval_window=(0.0, 1.0)))
+        t = to_table(Autoscaler(two; kw...), 0.0, 0.0, 0.0)
+        m4 = filter(isfinite, t.master_curve[t.L.==4])
+        m6 = filter(isfinite, t.master_curve[t.L.==6])
+        @test length(m4) ≥ 2 && all(≈(1.0), m4)
+        @test length(m6) ≥ 2 && all(≈(0.0), m6)
+    end
+    t = to_table(Autoscaler(two; use_all_sizes=true), 0.0, 0.0, 0.0)
+    @test t.master_curve ≈ fill(0.5, 6)
+
+    s = Autoscaler(data)
+    @test_throws ArgumentError cost_breakdown(s, 1.0, 0.0, 0.5)
+    s = Autoscaler(data; eval_window=(0.4, 0.6))
+    b = cost_breakdown(s, 1.0, 0.0, 0.5)
+    @test b.cost ≈ b.chi2 + b.penalty
+    @test b.penalty == 0
+    @test b.cost == s(1.0, 0.0, 0.5)
+end
+
+###
+### Synthetic scaling forms: the optimiser must recover the true parameters.
+###
+
+@testset "recovery: standard power-law collapse" begin
+    a0, b0, xc0 = 1.0, 0.25, 0.3
+    f(u) = 1 + tanh(u) + 0.3u
+    g(L, x) = L^(-b0) * f(L^a0 * (x - xc0))
+    xs = range(xc0 - 0.1, xc0 + 0.1; length=161)
+    x0 = [1.2, 0.1, 0.31]
+    # coverage bound: w ≤ 0.1 / (32/8)^a0 = 0.025
+    for (name, kw) in [COSTS; "fixed window" => (; eval_window=(xc0 - 0.025, xc0 + 0.025))]
+        @testset "$name, exact data" begin
+            s = Autoscaler(synthetic(g; xs); kw...)
+            @test s(a0, b0, xc0) < 0.05
+            @test s(a0, b0, xc0) < s(a0 + 0.1, b0, xc0)
+            @test s(a0, b0, xc0) < s(a0, b0 + 0.1, xc0)
+            @test s(a0, b0, xc0) < s(a0, b0, xc0 + 0.005)
+            p, c = fit(s, x0)
+            @test p[1] ≈ a0 atol = 0.02
+            @test p[2] ≈ b0 atol = 0.02
+            @test p[3] ≈ xc0 atol = 1e-3
+        end
+        @testset "$name, noisy data" begin
+            s = Autoscaler(synthetic(g; xs, σ=2e-3, rng=Xoshiro(42)); kw...)
+            p, c = fit(s, x0)
+            @test p[1] ≈ a0 atol = 0.1
+            @test p[2] ≈ b0 atol = 0.05
+            @test p[3] ≈ xc0 atol = 3e-3
+            @test 0.3 < c < 2       # χ²-like: ≈ 1 when errors are correct
+        end
+    end
+
+    @testset "f(0) = 0: a narrow window only identifies a - b" begin
+        # Near x_c, y ≈ f'(0) L^(a-b) (x - x_c), so a and b are degenerate without
+        # curvature in the window. The combination a - b must still come out right.
+        h(L, x) = L^(-b0) * tanh(L^a0 * (x - xc0))
+        s = Autoscaler(synthetic(h; xs, σ=2e-3, rng=Xoshiro(42));
+                       eval_window=(xc0 - 0.02, xc0 + 0.02))
+        p, _ = fit(s, x0)
+        @test p[1] - p[2] ≈ a0 - b0 atol = 0.05
+        @test p[3] ≈ xc0 atol = 3e-3
+    end
+end
+
+@testset "recovery: scale-invariant crossing (b = 0)" begin
+    a0, xc0 = 0.75, 0.06
+    # paper-like: weak L-dependence, S-shaped master curve, sizes 5..10
+    g(L, x) = -0.02 - 0.01 * atan(40 * L^a0 * (x - xc0))
+    xs = range(0.05, 0.07; length=81)
+    data = synthetic(g; sizes=5:10, xs, σ=2e-4, rng=Xoshiro(7))
+    # coverage bound: w ≤ 0.01 / 2^a0 ≈ 0.006
+    for (name, kw) in [COSTS; "fixed window" => (; eval_window=(0.0545, 0.0655))]
+        @testset "$name" begin
+            s = Autoscaler(data; kw...)
+            p, c = fit(s, [1.0, 0.1, 0.061])
+            @test p[1] ≈ a0 atol = 0.1
+            @test p[2] ≈ 0 atol = 0.05
+            @test p[3] ≈ xc0 atol = 1e-3
+            @test c < 2
+        end
+    end
+
+    @testset "fixed window: a too narrow window loses precision" begin
+        # Not a bug, but a property worth knowing: with w well below the coverage bound,
+        # b and x_c become correlated and scatter much more between noise realisations.
+        spread(w) = std_(map(7:12) do seed
+            d = synthetic(g; sizes=5:10, xs, σ=2e-4, rng=Xoshiro(seed))
+            fit(Autoscaler(d; eval_window=(xc0 - w, xc0 + w)), [1.0, 0.1, 0.061])[1][2]
+        end)
+        @test spread(0.002) > spread(0.0055)
+    end
+end
+
+@testset "recovery: hardcoded exponent" begin
+    a0, b0, xc0 = 1.5, -0.5, 0.0
+    g(L, x) = L^(-b0) * exp(-(L^a0 * x - 1)^2)
+    xs = range(-0.1, 0.3; length=201)
+    data = synthetic(g; sizes=[4, 6, 8, 10], xs, σ=1e-3)
+    s = Autoscaler(data; a=a0, eval_window=(0.0, 0.1))
+    @test free_parameter_names(s) == (:b, :x_c)
+    p, _ = fit(s, [-0.3, 0.01])
+    @test p[1] ≈ b0 atol = 0.02
+    @test p[2] ≈ xc0 atol = 2e-3
+end
+
+@testset "recovery: analytic background + critical part" begin
+    inv_ν, y0 = 1.48876, 3 - 2 * 1.48876
+    A0, B0, xc0 = 0.29, -0.75, 0.0597
+    f(u) = 0.01 * tanh(5u)
+    g(L, x) = A0 + B0 * (x - xc0) + L^(-y0) * f(L^inv_ν * (x - xc0))
+    xs = range(0.045, 0.075; length=121)
+    # coverage bound: w ≤ 0.015 / 2^1.49 ≈ 0.0054
+    data = synthetic(g; sizes=5:10, xs, σ=5e-5, rng=Xoshiro(3))
+    win = (xc0 - 0.004, xc0 + 0.004)
+
+    @testset "fixed exponents (literals in the ansatz)" begin
+        ans = @ansatz L^0.0225 * (y - A - B * (x - x_c)) ~ L^1.48876 * (x - x_c)
+        @test ans.param_names == (:A, :B, :x_c)
+        s = Autoscaler(data, ans; eval_window=win)
+        p, c = fit(s, [0.28, -0.6, 0.0605])
+        @test p[2] ≈ B0 atol = 0.05
+        @test p[3] ≈ xc0 atol = 5e-4
+        @test c < 2
+        # A is only weakly constrained: L^0.0225 is nearly constant, so a shift of A is
+        # almost indistinguishable from a constant in the master curve.
+        @test p[1] ≈ A0 atol = 0.02
+        @test cost_breakdown(s, p).penalty < 0.1
+    end
+
+    @testset "free crossover exponent" begin
+        ans = @ansatz L^b * (y - A - B * (x - x_c)) ~ L^a * (x - x_c)
+        s = Autoscaler(data, ans; b=y0, eval_window=win)
+        @test free_parameter_names(s) == (:A, :B, :a, :x_c)
+        p, _ = fit(s, [0.29, -0.7, 1.3, 0.0600])
+        @test p[3] ≈ inv_ν atol = 0.1
+        @test p[4] ≈ xc0 atol = 5e-4
+    end
+
+    @testset "simple ansatz on background data gives an effective exponent" begin
+        # This is the situation discussed for the paper: fitting L^b y ~ L^a (x - x_c)
+        # to data with a sizeable analytic background yields a < 1/ν and a worse cost.
+        bgdata = (; data.L, data.x, y=data.y .- A0, data.y_err)
+        simple = Autoscaler(bgdata; eval_window=win)
+        p_s, c_s = fit(simple, [1.0, 0.0, 0.0600])
+        ans = @ansatz L^0.0225 * (y - A - B * (x - x_c)) ~ L^1.48876 * (x - x_c)
+        full = Autoscaler(bgdata, ans; eval_window=win)
+        _, c_f = fit(full, [0.0, -0.6, 0.0605])
+        @test p_s[1] < inv_ν - 0.2
+        @test c_s > c_f
+    end
+end
+
+###
+### Behaviour of the fixed-window cost
+###
+
+@testset "fixed-window cost is continuous and cannot be gamed" begin
+    a0, b0, xc0 = 1.0, 0.0, 0.3
+    g(L, x) = L^(-b0) * tanh(L^a0 * (x - xc0))
+    xs = range(xc0 - 0.1, xc0 + 0.1; length=81)
+    data = synthetic(g; xs, σ=1e-3, rng=Xoshiro(11))
+    s = Autoscaler(data; eval_window=(xc0 - 0.03, xc0 + 0.03))
+
+    # scan a through the point where the largest size stops covering the window
+    as = range(0.5, 2.5; length=2001)
+    cs = [s(a, b0, xc0) for a in as]
+    @test all(isfinite, cs)
+    jumps = abs.(diff(cs))
+    @test maximum(jumps) < 0.05 * maximum(cs)
+
+    # large exponents push the data outside each other's range: penalised, not rewarded
+    @test cost_breakdown(s, 2.5, b0, xc0).penalty > 0
+    @test s(2.5, b0, xc0) > s(a0, b0, xc0)
+    # absurd shifts of x_c are penalised as well
+    @test s(a0, b0, xc0 + 1.0) > 100 * s(a0, b0, xc0)
+
+    # the scored set of points never changes with the parameters
+    n_before = count(s.eval_mask)
+    s(2.0, 0.5, 0.2)
+    @test count(s.eval_mask) == n_before
+end
+
+end # @testset "Autoscalers"
