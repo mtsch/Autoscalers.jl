@@ -1,6 +1,7 @@
 # Fixed-window cost function: a fixed set of points, chosen in raw `x`, is compared to the
-# master curve of the other curves. Extrapolation beyond a curve's data is penalised smoothly,
-# so the cost is continuous in the parameters and cannot be lowered by moving the window.
+# master curve of the other curves. Extrapolation beyond a curve's data is penalised
+# smoothly, so the cost is continuous in the parameters and cannot be lowered by moving the
+# window.
 
 """
     fixed_master_curve(a::Autoscaler, x, own_curve)

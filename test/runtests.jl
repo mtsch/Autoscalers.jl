@@ -636,7 +636,9 @@ end
     s = Autoscaler(data, ans; eval_window=win)
     @test length(s.curve_ranges) == 4 * length(us)
     @test s.curve_labels[1:2] == ["L=5, u=-0.2", "L=5, u=0.1"]
-    @test all(r -> allequal(view(s.data.u, r)) && allequal(view(s.sizes, r)), s.curve_ranges)
+    @test all(s.curve_ranges) do r
+        allequal(view(s.data.u, r)) && allequal(view(s.sizes, r))
+    end
 
     p, c = fit(s, [0.3, -4.0, 0.061])
     @test p[1] ≈ α0 atol = 0.02

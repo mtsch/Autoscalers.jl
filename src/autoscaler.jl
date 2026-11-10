@@ -21,8 +21,8 @@ parameters (in the order of `ansatz.param_names`, skipping hardcoded ones) retur
 * `eval_window = (lo, hi)`: use the fixed-window cost. Only data points with
   `lo ≤ x ≤ hi` in the *raw* (unscaled) `x` are scored, independently of the parameters.
   Points outside it still serve as interpolation knots. Where another curve does not cover
-  a point's scaled `x`, its curve is extrapolated linearly and a smooth penalty `penalty * d^2`
-  is added (`d` = distance outside, in units of that curve's scaled range).
+  a point's scaled `x`, that curve is extrapolated linearly and a smooth penalty
+  `penalty * d^2` is added (`d` = distance outside, in units of that curve's scaled range).
 * `fix`: `NamedTuple` of parameters held at fixed values, e.g. `fix=(; a=1/ν)`. They are
   left out of the arguments of the cost function.
 
@@ -152,11 +152,12 @@ function Autoscaler(
     for (i, r) in enumerate(rows)
         if i == 1 || curve_key(r) ≠ curve_key(rows[i - 1])
             push!(curve_ranges, i:i)
-            names = (:L, group...)
-            push!(curve_labels, join(("$n=$v" for (n, v) in zip(names, curve_key(r))), ", "))
+            label = join(("$n=$v" for (n, v) in zip((L, group...), curve_key(r))), ", ")
+            push!(curve_labels, label)
         elseif x_raw[i] == x_raw[i - 1]
             # Interpolation and the classic cost need strictly increasing x within a curve.
-            throw(ArgumentError("duplicate rows for $(curve_labels[end]), `$x`=$(x_raw[i])"))
+            label = curve_labels[end]
+            throw(ArgumentError("duplicate rows for $label, `$x`=$(x_raw[i])"))
         else
             curve_ranges[end] = first(curve_ranges[end]):i
         end
@@ -422,7 +423,9 @@ function to_table(a::Autoscaler, args::Union{AbstractVector,Tuple})
             ismissing(m) ? NaN : m[1]
         end
     else
-        master = [first(new_master_curve(a, x, c)) for (x, c) in zip(a.x_val_scaled, a.curve)]
+        master = map(zip(a.x_val_scaled, a.curve)) do (x, c)
+            first(new_master_curve(a, x, c))
+        end
     end
     group = a.ansatz.group
     return (;
