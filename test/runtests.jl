@@ -221,6 +221,10 @@ end
     thin.y_err[13:22] .= 0
     @test_throws ArgumentError Autoscaler(thin)
 
+    # duplicate (L, x) rows, also when they are not adjacent in the input
+    dup = (; L=[data.L; 6], x=[data.x; 0.3], y=[data.y; 0.3], y_err=[data.y_err; 1e-3])
+    @test_throws ArgumentError Autoscaler(dup)
+
     # scaled x must be ascending within each size
     rev = @ansatz L^b * y ~ L^a * (x_c - x)
     s = Autoscaler(data, rev)

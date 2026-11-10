@@ -27,7 +27,8 @@ parameters (in the order of `ansatz.param_names`, skipping hardcoded ones) retur
 * `params...`: hardcode parameters by name, e.g. `a = 1/ν`.
 
 Rows with missing or non-finite values, or with `y_err ≤ 0`, are skipped with a warning.
-System sizes must be positive integers, and each size needs at least two usable rows.
+System sizes must be positive integers, each size needs at least two usable rows, and
+no two rows may share the same `L` and `x`.
 
 The `Autoscaler` reuses internal buffers between calls, so a single instance must not be
 evaluated from several threads at once.
@@ -133,6 +134,9 @@ function Autoscaler(
             push!(avail_sizes, curr_size)
             prev_size = curr_size
             start_index = i
+        elseif row[x] == last(x_val_raw)
+            # Interpolation and the classic cost need strictly increasing x within a size.
+            throw(ArgumentError("duplicate rows for L=$curr_size, `$x`=$(row[x])"))
         end
         push!(x_val_raw, row[x])
         push!(y_val_raw, row[y])
