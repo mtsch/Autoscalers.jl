@@ -13,4 +13,10 @@ makedocs(;
     checkdocs=:exports,
 )
 
-deploydocs(; repo="github.com/mtsch/Autoscalers.jl.git", devbranch="main")
+# Pull requests from this repository are deployed to `previews/PR<number>`; the
+# DocPreviewCleanup workflow removes them when the pull request is closed.
+deploydocs(;
+    repo="github.com/mtsch/Autoscalers.jl.git",
+    devbranch="main",
+    push_preview=true,
+)

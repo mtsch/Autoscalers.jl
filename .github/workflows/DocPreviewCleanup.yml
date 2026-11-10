@@ -1,0 +1,34 @@
+name: Doc Preview Cleanup
+
+on:
+  pull_request:
+    types: [closed]
+
+concurrency:
+  group: doc-preview-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Delete documentation preview
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Delete the preview from gh-pages
+        env:
+          preview_dir: previews/PR${{ github.event.number }}
+        run: |
+          if ! git fetch --depth=1 origin gh-pages:gh-pages; then
+              echo "No gh-pages branch yet, nothing to clean up."
+              exit 0
+          fi
+          git switch gh-pages
+          if [ -d "$preview_dir" ]; then
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git rm -r --quiet "$preview_dir"
+              git commit -m "Delete documentation preview of PR ${{ github.event.number }}"
+              git push origin gh-pages
+          fi
