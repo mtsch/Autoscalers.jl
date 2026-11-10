@@ -1,13 +1,13 @@
-# Classic cost function of Houdayer & Hartmann, PRB 70, 014418 (2004), Appendix A: every
-# point is compared to a weighted linear fit through the neighbouring points of all other
-# sizes.
+# Classic cost function of Houdayer & Hartmann, Phys. Rev. B 70, 014418 (2004),
+# https://doi.org/10.1103/PhysRevB.70.014418, Appendix A: every point is compared to a
+# weighted linear fit through the neighbouring points of all other sizes.
 
 """
     select_subset(c::Autoscaler, selected_x, selected_size)
 
 From every size other than `selected_size`, select the two neighbouring points `j, j + 1`
 with `x[j] ≤ selected_x ≤ x[j + 1]`, or nothing if that size does not bracket `selected_x`
-(Houdayer & Hartmann, Appendix A).
+([Houdayer & Hartmann (2004)](https://doi.org/10.1103/PhysRevB.70.014418), Appendix A).
 """
 function select_subset(c::Autoscaler, selected_x, selected_size)
     empty!(c.selected_x_val)
@@ -65,6 +65,12 @@ end
 
 Quality `S` of Eq. A1: the mean of `(y - Y)^2 / (dy^2 + dY^2)` over all points for which the
 master curve is defined. `Inf` if it is defined for none.
+
+# References
+
+- J. Houdayer and A. K. Hartmann, *Low-temperature behavior of two-dimensional Gaussian
+  Ising spin glasses*, Phys. Rev. B **70**, 014418 (2004),
+  [doi:10.1103/PhysRevB.70.014418](https://doi.org/10.1103/PhysRevB.70.014418).
 """
 function standard_cost_function(c::Autoscaler, params)
     transform!(c, params)
