@@ -1,7 +1,7 @@
 # Coverage of bootstrap percentile intervals and size of the bootstrap tests on synthetic
 # data with known parameters. Too slow for CI; run with e.g.
 #
-#     julia --project --threads=auto test/scripts/bootstrap_coverage.jl [datasets] [replicates]
+#     julia --project -t auto test/scripts/bootstrap_coverage.jl [datasets] [replicates]
 #
 # A well-calibrated interval of level 1 - α contains the true value in a fraction 1 - α of
 # the datasets, and a test of the true value rejects at level α in a fraction α of them.
@@ -31,22 +31,23 @@ function main(n_datasets, n_replicates; n_null=max(1, n_datasets ÷ 4))
     rng = Xoshiro(20261110)
     names = keys(TRUTH)
     levels = (0.68, 0.95)
-    covered = Dict((name, level) => 0 for name in names, level in levels)
-    rejected_percentile = Dict(name => 0 for name in names)
+    methods = (:percentile, :bc)
+    covered = Dict((m, name, level) => 0 for m in methods, name in names, level in levels)
+    rejected = Dict((m, name) => 0 for m in methods, name in names)
     rejected_null = 0
     for k in 1:n_datasets
         s = Autoscaler(dataset(rng); eval_window=WINDOW)
         estimate = fit_collapse(s, [1.1, 0.2, 0.31]).params
         b = bootstrap(s, estimate; n=n_replicates, rng, progress=false)
-        for level in levels
-            intervals = confint(b; level)
+        for method in methods, level in levels
+            intervals = confint(b; level, method)
             for name in names
                 lo, hi = intervals[name]
-                covered[(name, level)] += lo ≤ TRUTH[name] ≤ hi
+                covered[(method, name, level)] += lo ≤ TRUTH[name] ≤ hi
             end
         end
-        for name in names
-            rejected_percentile[name] += pvalue(b, name => TRUTH[name]) < 0.05
+        for method in methods, name in names
+            rejected[(method, name)] += pvalue(b, name => TRUTH[name]; method) < 0.05
         end
         if k ≤ n_null
             p = pvalue(b, :a => TRUTH.a; method=:null, n=n_replicates, rng, progress=false)
@@ -55,20 +56,22 @@ function main(n_datasets, n_replicates; n_null=max(1, n_datasets ÷ 4))
         print("\rdataset $k/$n_datasets")
     end
     println()
-    for level in levels
-        se = binomial_se(level, n_datasets)
-        @printf("%.0f%% intervals (±%.3f):", 100level, se)
+    for method in methods
+        for level in levels
+            se = binomial_se(level, n_datasets)
+            @printf("%-10s %.0f%% intervals (±%.3f):", method, 100level, se)
+            for name in names
+                @printf("  %s %.3f", name, covered[(method, name, level)] / n_datasets)
+            end
+            println()
+        end
+        se = binomial_se(0.05, n_datasets)
+        @printf("%-10s test, rejections at 5%% (±%.3f):", method, se)
         for name in names
-            @printf("  %s %.3f", name, covered[(name, level)] / n_datasets)
+            @printf("  %s %.3f", name, rejected[(method, name)] / n_datasets)
         end
         println()
     end
-    se = binomial_se(0.05, n_datasets)
-    @printf("percentile test, rejections at 5%% (±%.3f):", se)
-    for name in names
-        @printf("  %s %.3f", name, rejected_percentile[name] / n_datasets)
-    end
-    println()
     @printf(
         "null-resampling test of a, rejections at 5%% (±%.3f): %.3f over %d datasets\n",
         binomial_se(0.05, n_null), rejected_null / n_null, n_null,

@@ -5,6 +5,7 @@ using ForwardDiff: ForwardDiff, Dual
 using Optim: Optim, NelderMead, optimize
 using ProgressMeter: Progress, finish!, next!
 using Random: Random, Xoshiro
+using SpecialFunctions: erfc, erfcinv
 using Statistics: quantile, std
 using StatsAPI: StatsAPI, confint, pvalue, stderror
 

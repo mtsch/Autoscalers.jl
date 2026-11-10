@@ -96,6 +96,40 @@
         @test_throws ArgumentError confint(b; level=1.0)
     end
 
+    @testset "bias-corrected intervals" begin
+        bc = confint(b; method=:bc)
+        @test keys(bc) == b.param_names
+        for name in b.param_names
+            @test bc[name][1] < bc[name][2]
+        end
+        # with samples symmetric around the estimate, z₀ = 0 and BC equals percentile
+        mirrored = vcat(b.samples, 2 .* estimate' .- b.samples)
+        sym = BootstrapResult(
+            s, b.param_names, estimate, mirrored, trues(2n), b.method, b.options
+        )
+        for name in b.param_names
+            @test all(confint(sym; method=:bc)[name] .≈ confint(sym)[name])
+        end
+        # samples off-centre above the estimate: BC moves the interval down
+        shifted = b.samples .+ 0.5 .* collect(stderror(b))'
+        up = BootstrapResult(
+            s, b.param_names, estimate, shifted, trues(n), b.method, b.options
+        )
+        @test all(confint(up; method=:bc).a .< confint(up).a)
+        # The BC test is dual to the BC interval. Checked on many off-centre samples,
+        # because with few the shifted quantile levels are not resolved.
+        many = estimate' .+ 0.003 .+ 0.01 .* randn(Xoshiro(4), 4000, 3)
+        off = BootstrapResult(
+            s, b.param_names, estimate, many, trues(4000), b.method, b.options
+        )
+        lo, hi = confint(off; level=0.9, method=:bc).a
+        @test pvalue(off, :a => (lo + hi) / 2; method=:bc) > 0.1
+        @test pvalue(off, :a => lo; method=:bc) ≈ 0.1 atol = 0.01
+        @test pvalue(off, :a => hi; method=:bc) ≈ 0.1 atol = 0.01
+        @test_throws ArgumentError confint(b; method=:bca)
+        @test_throws ArgumentError pvalue(b, :a => 1.0, :b => 0.25; method=:bc)
+    end
+
     @testset "pvalue" begin
         # percentile: consistent with the interval, and bounded below by 2/(n + 1)
         @test pvalue(b, :a => estimate[1]) > 0.3
