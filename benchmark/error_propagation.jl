@@ -1,4 +1,10 @@
 # Benchmark of the error propagation: transform! and full cost evaluations.
+#
+# Run from the repository root with an environment that has the package, BenchmarkTools and
+# Optim, e.g.
+#
+#     julia --project=benchmark -e 'using Pkg; Pkg.develop(path="."); Pkg.add(["BenchmarkTools", "Optim"])'
+#     julia --project=benchmark benchmark/error_propagation.jl
 using Autoscalers, BenchmarkTools, Random, Optim, Printf
 using Autoscalers: transform!
 
