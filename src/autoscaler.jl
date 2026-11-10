@@ -1,7 +1,6 @@
 """
     Autoscaler(
-        table, ansatz::ScalingAnsatz=DEFAULT_ANSATZ;
-        x=:x, y=:y, y_err=:y_err, L=:L,
+        table, ansatz::Ansatz=DEFAULT_ANSATZ;
         classic_cost_function=false,
         use_all_sizes=false,
         window_width=1,
@@ -13,7 +12,6 @@
 Prepare `table` for finite-size scaling with `ansatz`. Calling the result with the free
 parameters (in the order of `ansatz.param_names`, skipping hardcoded ones) returns the cost.
 
-* `x`, `y`, `y_err`, `L`: column names. Defaults are taken from the remaps of `ansatz`.
 * `classic_cost_function`: use the cost function of
   [Houdayer & Hartmann (2004)](https://doi.org/10.1103/PhysRevB.70.014418) (per-point,
   local linear master curve) instead of the integral cost.
@@ -27,9 +25,10 @@ parameters (in the order of `ansatz.param_names`, skipping hardcoded ones) retur
   is added (`d` = distance outside, in units of that size's scaled range).
 * `params...`: hardcode parameters by name, e.g. `a = 1/ν`.
 
-Rows with missing or non-finite values, or with `y_err ≤ 0`, are skipped with a warning.
-System sizes must be positive integers, each size needs at least two usable rows, and
-no two rows may share the same `L` and `x`.
+Only the columns used by `ansatz` are read. Rows with missing or non-finite values in them,
+or with a non-positive error, are skipped with a warning. System sizes must be positive
+integers, each size needs at least two usable rows, and no two rows may share the same size
+and `x`.
 
 The `Autoscaler` reuses internal buffers between calls, so a single instance must not be
 evaluated from several threads at once.
@@ -40,12 +39,13 @@ evaluated from several threads at once.
   Ising spin glasses*, Phys. Rev. B **70**, 014418 (2004),
   [doi:10.1103/PhysRevB.70.014418](https://doi.org/10.1103/PhysRevB.70.014418).
 """
-struct Autoscaler{P,S<:ScalingAnsatz{P}}
-    ansatz::S
+struct Autoscaler{P,A<:Ansatz{P},D<:NamedTuple,E<:NamedTuple}
+    ansatz::A
 
-    x_val_raw::Vector{Float64}
-    y_val_raw::Vector{Float64}
-    y_err_raw::Vector{Float64}
+    # Columns used by the ansatz, sorted by size and `x`, and for each of them its errors
+    # or `nothing`.
+    data::D
+    errors::E
 
     x_val_scaled::Vector{Float64}
     y_val_scaled::Vector{Float64}
@@ -74,8 +74,7 @@ struct Autoscaler{P,S<:ScalingAnsatz{P}}
 end
 
 function Autoscaler(
-    table, ansatz::ScalingAnsatz=DEFAULT_ANSATZ;
-    x=nothing, y=nothing, y_err=nothing, L=nothing,
+    table, ansatz::Ansatz=DEFAULT_ANSATZ;
     classic_cost_function=false,
     use_all_sizes=false,
     window_width=1,
@@ -83,11 +82,6 @@ function Autoscaler(
     penalty=100.0,
     kwargs...
 )
-    x = something(x, get(ansatz.remaps, :x, :x))
-    y = something(y, get(ansatz.remaps, :y, :y))
-    y_err = something(y_err, get(ansatz.remaps, :y_err, :y_err))
-    L = something(L, get(ansatz.remaps, :L, :L))
-
     for (k, _) in kwargs
         if k ∉ ansatz.param_names
             throw(ArgumentError("unrecognized keyword argument `$k`"))
@@ -98,17 +92,21 @@ function Autoscaler(
     end
     0 < window_width ≤ 1 || throw(ArgumentError("`window_width` must be in (0, 1]"))
 
+    L = ansatz.size
+    x = ansatz.x
+    columns = ansatz.columns
+    error_columns = Tuple(ansatz.errors)
     n_missing = n_nonfinite = n_bad_err = 0
     rows = filter(collect(Tables.rows(table))) do row
-        values = (row[L], row[x], row[y], row[y_err])
+        values = map(c -> Tables.getcolumn(row, c), (columns..., error_columns...))
         if any(ismissing, values)
             n_missing += 1
         elseif !all(isfinite, values)
             n_nonfinite += 1
-        elseif row[y_err] ≤ 0
+        elseif any(c -> Tables.getcolumn(row, c) ≤ 0, error_columns)
             n_bad_err += 1
         else
-            l = row[L]
+            l = Tables.getcolumn(row, L)
             if !(isinteger(l) && l > 0)
                 throw(ArgumentError("system sizes `$L` must be positive integers, got $l"))
             end
@@ -120,20 +118,27 @@ function Autoscaler(
     # every later `Autoscaler` in the session.
     n_missing > 0 && @warn "Skipping $n_missing rows with missing values."
     n_nonfinite > 0 && @warn "Skipping $n_nonfinite rows with non-finite values."
-    n_bad_err > 0 && @warn "Skipping $n_bad_err rows with non-positive `$y_err`."
-    sort!(rows; by=r -> (r[L], r[x]))
+    if n_bad_err > 0
+        names = join(("`$c`" for c in error_columns), ", ")
+        @warn "Skipping $n_bad_err rows with non-positive errors in $names."
+    end
+    sort!(rows; by=r -> (Tables.getcolumn(r, L), Tables.getcolumn(r, x)))
 
-    x_val_raw = Float64[]
-    y_val_raw = Float64[]
-    y_err_raw = Float64[]
-    sizes = Int[]
+    sizes = Int[Tables.getcolumn(r, L) for r in rows]
+    x_raw = Float64[Tables.getcolumn(r, x) for r in rows]
+    data = NamedTuple{columns}(map(columns) do c
+        c == L ? sizes : c == x ? x_raw : Float64[Tables.getcolumn(r, c) for r in rows]
+    end)
+    errors = NamedTuple{columns}(map(columns) do c
+        haskey(ansatz.errors, c) || return nothing
+        return Float64[Tables.getcolumn(r, ansatz.errors[c]) for r in rows]
+    end)
+
     avail_sizes = Int[]
     size_map = Dict{Int,UnitRange{Int}}()
-
     prev_size = -1
     start_index = 0
-    for (i, row) in enumerate(rows)
-        curr_size = Int(row[L])
+    for (i, curr_size) in enumerate(sizes)
         if curr_size ≠ prev_size
             if prev_size > 0
                 size_map[prev_size] = start_index:(i - 1)
@@ -141,18 +146,14 @@ function Autoscaler(
             push!(avail_sizes, curr_size)
             prev_size = curr_size
             start_index = i
-        elseif row[x] == last(x_val_raw)
+        elseif x_raw[i] == x_raw[i - 1]
             # Interpolation and the classic cost need strictly increasing x within a size.
-            throw(ArgumentError("duplicate rows for L=$curr_size, `$x`=$(row[x])"))
+            throw(ArgumentError("duplicate rows for L=$curr_size, `$x`=$(x_raw[i])"))
         end
-        push!(x_val_raw, row[x])
-        push!(y_val_raw, row[y])
-        push!(y_err_raw, row[y_err])
-        push!(sizes, curr_size)
     end
     isempty(avail_sizes) && throw(ArgumentError("no usable data"))
     length(avail_sizes) ≥ 2 || throw(ArgumentError("need at least two system sizes"))
-    size_map[prev_size] = start_index:length(x_val_raw)
+    size_map[prev_size] = start_index:length(sizes)
     for l in avail_sizes
         if length(size_map[l]) < 2
             throw(ArgumentError("system size L=$l has fewer than two usable data points"))
@@ -163,11 +164,11 @@ function Autoscaler(
     # always match the internal arrays.
     if isnothing(eval_window)
         ew = nothing
-        eval_mask = trues(length(x_val_raw))
+        eval_mask = trues(length(x_raw))
     else
         ew = (Float64(eval_window[1]), Float64(eval_window[2]))
         ew[1] < ew[2] || throw(ArgumentError("`eval_window` must satisfy lo < hi"))
-        eval_mask = BitVector(ew[1] .≤ x_val_raw .≤ ew[2])
+        eval_mask = BitVector(ew[1] .≤ x_raw .≤ ew[2])
         for l in avail_sizes
             if !any(view(eval_mask, size_map[l]))
                 @warn "System size L=$l has no data points inside `eval_window`; " *
@@ -177,13 +178,14 @@ function Autoscaler(
         any(eval_mask) || throw(ArgumentError("no data points inside `eval_window`"))
     end
 
+    n = length(sizes)
+    n_params = length(ansatz.param_names)
     result = Autoscaler(
-        ansatz,
-        x_val_raw, y_val_raw, y_err_raw,
-        copy(x_val_raw), copy(y_val_raw), copy(y_err_raw),
+        ansatz, data, errors,
+        zeros(n), zeros(n), zeros(n),
         sizes, avail_sizes, size_map,
         Float64[], Float64[], Float64[],
-        fill(NaN, length(ansatz.param_names)), zeros(length(ansatz.param_names)),
+        fill(NaN, n_params), zeros(n_params),
         classic_cost_function, use_all_sizes, Float64(window_width),
         ew, eval_mask, Float64(penalty),
     )
@@ -209,14 +211,15 @@ function free_parameter_names(a::Autoscaler)
 end
 
 function transform!(a::Autoscaler, params)
+    p = parameter_tuple(a.ansatz, params)
+    f = a.ansatz.f
     for i in eachindex(a.x_val_scaled)
-        L, x, y, y_err = a.sizes[i], a.x_val_raw[i], a.y_val_raw[i], a.y_err_raw[i]
-
-        a.x_val_scaled[i] = a.ansatz.scale_x(x, L, params)
-
-        y_scaled = a.ansatz.scale_y(x, y ± y_err, L, params)
-        a.y_val_scaled[i] = Measurements.value(y_scaled)
-        a.y_err_scaled[i] = Measurements.uncertainty(y_scaled)
+        row = map(a.data, a.errors) do values, errors
+            return isnothing(errors) ? values[i] : values[i] ± errors[i]
+        end
+        x, y = f(row, p)
+        a.x_val_scaled[i] = scaled_x(x)
+        a.y_val_scaled[i], a.y_err_scaled[i] = scaled_y(y)
     end
     # Interpolation and the overlap window assume ascending scaled `x` within each size.
     for size in a.avail_sizes
@@ -229,6 +232,25 @@ function transform!(a::Autoscaler, params)
     end
     return nothing
 end
+
+scaled_x(x::Real) = Float64(x)
+function scaled_x(::Measurement)
+    throw(ArgumentError("the scaled `x` must not depend on columns with errors"))
+end
+
+scaled_y(y::Measurement) = (Measurements.value(y), Measurements.uncertainty(y))
+function scaled_y(::Real)
+    throw(ArgumentError(
+        "the scaled `y` has no error; it must depend on a column listed in `errors`"
+    ))
+end
+
+"""
+    raw_x(a::Autoscaler)
+
+Unscaled `x` of all data points, in the internal order.
+"""
+raw_x(a::Autoscaler) = a.data[a.ansatz.x]
 
 function scaled_data(a::Autoscaler, size)
     range = a.size_map[size]
