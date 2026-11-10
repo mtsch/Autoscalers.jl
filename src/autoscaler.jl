@@ -132,9 +132,12 @@ function Autoscaler(
         c == L ? sizes : c == x ? x_raw : Float64[Tables.getcolumn(r, c) for r in rows]
     end)
     errors = NamedTuple{columns}(map(columns) do c
-        haskey(ansatz.errors, c) || return nothing
-        slot = findfirst(==(c), keys(ansatz.errors))
-        return (slot, Float64[Tables.getcolumn(r, ansatz.errors[c]) for r in rows])
+        if haskey(ansatz.errors, c)
+            slot = findfirst(==(c), keys(ansatz.errors))
+            return (slot, Float64[Tables.getcolumn(r, ansatz.errors[c]) for r in rows])
+        else
+            return nothing
+        end
     end)
 
     avail_sizes = Int[]
