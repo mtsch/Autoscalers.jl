@@ -1,25 +1,18 @@
 """
-    get_variables(expr::Expr, ignore)
+    get_variables(expr, ignore)
 
-Get all variable names that appear in `expr`.
+Get all variable names that appear in `expr`, except those in `ignore`.
 """
 function get_variables(expr::Expr, ignore)
     if expr.head == :call
-        vars = reduce(vcat, get_variables.(expr.args[2:end], Ref(ignore)))
+        isempty(expr.args[2:end]) && return Symbol[]
+        return reduce(vcat, get_variables.(expr.args[2:end], Ref(ignore)))
     else
         throw(ArgumentError("malformed input $expr"))
     end
 end
-function get_variables(s::Symbol, ignore)
-    if s in ignore
-        return Symbol[]
-    else
-        return Symbol[s]
-    end
-end
-function get_variables(r::Any, _)
-    return Symbol[]
-end
+get_variables(s::Symbol, ignore) = s in ignore ? Symbol[] : Symbol[s]
+get_variables(::Any, _) = Symbol[]
 
 """
     replace_params!(expr::Expr, mapping::Dict{Symbol})
@@ -41,19 +34,16 @@ function replace_params!(expr::Expr, mapping::Dict{Symbol})
 end
 replace_params!(sym, _) = sym
 
-function extract_params_and_split_x_and_y(expr)
-    return x_scaling, y_scaling, Tuple(params)
-end
-
 """
-    @ansatz expr1(y, L) ~ expr2(x, L)
+    @ansatz expr1(y, L[, x]) ~ expr2(x, L)
 
 A scaling ansatz to use with [`Autoscaler`](@ref), where `x` and `y` are the variables to
 scale and `L` is the system size.
 
 `expr1` and `expr2` can be arbitrary expressions. Any variables that appear in these
-expressions will be exposed as parameters by [`Autoscaler`](@ref). For example, the ansatz
-`@ansatz L^b * y ~ L^a * (x - x_c)` has three parameters, `a`,`b`, and `x_c`:
+expressions, other than `x`, `y` and `L`, are exposed as parameters, sorted alphabetically.
+For example, the ansatz `@ansatz L^b * y ~ L^a * (x - x_c)` has three parameters, `a`,`b`,
+and `x_c`:
 
 ```julia
 a = @ansatz L^b * y ~ L^a * (x - x_c)
@@ -61,9 +51,16 @@ a.param_names
 # (:a, :b, :x_c)
 ```
 
-`x`, `y`, and `L` can be remapped to match your data by attaching `name => new_name` pairs
-to the end of the macro call. For example, if your data includes a column `system_size` that
-plays the role of `L`, you can remap it as
+`y` must appear on the left-hand side and `x` on the right-hand side. `x` may also appear on
+the left-hand side, e.g. to subtract an analytic background:
+
+```julia
+@ansatz L^b * (y - A - B * (x - x_c)) ~ L^a * (x - x_c)
+```
+
+The column names used for `x`, `y`, `y_err`, and `L` can be remapped to match your data by
+attaching `name => new_name` pairs to the end of the macro call. These become the defaults
+of the corresponding keyword arguments of [`Autoscaler`](@ref):
 
 ```julia
 a = @ansatz L^b * y ~ L^a * (x - x_c) L => system_size
@@ -72,8 +69,8 @@ a = @ansatz L^b * y ~ L^a * (x - x_c) L => system_size
 macro ansatz(expr, exprs...)
     orig_expr = deepcopy(expr)
 
-    if expr.args[1] ≢ :~
-        throw(ArgumentError("expected separator `~`, got `$(expr.args[1])`"))
+    if !(expr isa Expr && expr.head == :call && expr.args[1] ≡ :~)
+        throw(ArgumentError("expected an expression of the form `left ~ right`, got `$expr`"))
     end
     params = sort!(unique(get_variables(expr, [:x, :y, :L])))
     param_mapping = Dict{Symbol,Expr}()
@@ -95,24 +92,26 @@ macro ansatz(expr, exprs...)
     expr_right = replace_params!(expr_right, param_mapping)
 
     scale_y = quote
-        function(x, y, L, params)
+        function (x, y, L, params)
             return $expr_left
         end
     end
     scale_x = quote
-        function(x, L, params)
+        function (x, L, params)
             return $expr_right
         end
     end
 
     remaps = Dict{Symbol,Symbol}()
-    for expr in exprs
-        if expr.args[1] ≢ :(=>)
-            throw(ArgumentError("extra arguments must be of the form `:name => value`"))
-        elseif expr.args[2] ∉ (:L, :x, :y, :y_err)
-            throw(ArgumentError())
+    for e in exprs
+        if !(e isa Expr && e.head == :call && e.args[1] ≡ :(=>))
+            throw(ArgumentError("extra arguments must be of the form `name => new_name`"))
+        elseif e.args[2] ∉ (:L, :x, :y, :y_err)
+            throw(ArgumentError(
+                "only `L`, `x`, `y`, and `y_err` can be remapped, got `$(e.args[2])`"
+            ))
         else
-            remaps[expr.args[2]] = expr.args[3]
+            remaps[e.args[2]] = e.args[3]
         end
     end
 
@@ -142,13 +141,3 @@ function Base.show(io::IO, a::ScalingAnsatz)
 end
 
 const DEFAULT_ANSATZ = @ansatz(L^b * y ~ L^a * (x - x_c))
-
-function relevant_columns(a::ScalingAnsatz, tbl)
-    cols = Tables.columns(tbl)
-    L = get(a.remaps, :L, :L)
-    x = get(a.remaps, :x, :x)
-    y = get(a.remaps, :y, :y)
-    y_err = get(a.remaps, :y, Symbol(y, :_err))
-
-    return (L=cols[L], x=cols[x], y=cols[y], y_err=cols[y_err])
-end
