@@ -126,21 +126,26 @@ function rewrite(ex, ctx::AnsatzContext)
         push!(ctx.columns, col)
         return Expr(:., ctx.row, QuoteNode(col))
     elseif ex.head == :call
-        f = ex.args[1]
-        if f in ctx.params
-            throw(ArgumentError("parameter `$f` cannot be called as a function"))
-        end
-        return Expr(:call, esc(f), (rewrite(a, ctx) for a in ex.args[2:end])...)
+        f = rewrite_callee(ex.args[1], ctx)
+        return Expr(:call, f, (rewrite(a, ctx) for a in ex.args[2:end])...)
     elseif ex.head == :kw
         return Expr(:kw, ex.args[1], rewrite(ex.args[2], ctx))
     elseif ex.head == :. && ex.args[2] isa QuoteNode
-        # Qualified names such as `Base.sin`: the quoted part is a field, not a column.
-        return esc(ex)
+        # Field access such as `Base.sin` or `$config.shift`: the quoted part is a field
+        # name, not a column.
+        return Expr(:., rewrite(ex.args[1], ctx), ex.args[2])
     elseif ex.head == :.
-        return Expr(:., esc(ex.args[1]), rewrite(ex.args[2], ctx))
+        return Expr(:., rewrite_callee(ex.args[1], ctx), rewrite(ex.args[2], ctx))
     else
         return Expr(ex.head, (rewrite(a, ctx) for a in ex.args)...)
     end
+end
+
+function rewrite_callee(f, ctx::AnsatzContext)
+    if f isa Symbol && f in ctx.params
+        throw(ArgumentError("parameter `$f` cannot be called as a function"))
+    end
+    return rewrite(f, ctx)
 end
 
 """

@@ -145,6 +145,15 @@ end
     q = @ansatz a -> (:y ± :y_err) ~ Base.sqrt(:L) * sqrt.(:x)
     @test q.f((; L=4, x=9.0, y=0.0), (; a=0.0))[1] == 6.0
 
+    # `$` values and parameters also work as callees and as receivers of field access
+    scale = x -> 2x
+    config = (; shift=0.5)
+    c = @ansatz a -> (:y ± :y_err) ~ ($scale)(:x) + ($scale).(:x) - ($config).shift
+    @test c.f((; L=1, x=3.0, y=0.0), (; a=0.0))[1] == 6 + 6 - 0.5
+    pc = @ansatz a -> (:y ± :y_err) ~ Base.Fix2(^, a)(:x)
+    @test pc.f((; L=1, x=3.0, y=0.0), (; a=2.0))[1] == 9.0
+    @test_throws ArgumentError @macroexpand @ansatz a -> (:y ± :e) ~ a.(:x)
+
     # several columns with errors
     two = @ansatz a -> (:y ± :y_err) - (:z ± :z_err) ~ :L^a * :x
     @test two.errors == (; y=:y_err, z=:z_err)
