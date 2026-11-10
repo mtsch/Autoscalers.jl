@@ -234,8 +234,11 @@ function transform!(a::Autoscaler, params)
     n_errors = Val(length(a.ansatz.errors))
     for i in eachindex(a.x_val_scaled)
         row = map(a.data, a.errors) do values, errors
-            isnothing(errors) && return values[i]
-            return error_dual(values[i], errors, i, n_errors)
+            if isnothing(errors)
+                return values[i]
+            else
+                return error_dual(values[i], errors, i, n_errors)
+            end
         end
         x, y = f(row, p)
         a.x_val_scaled[i] = scaled_x(x)
