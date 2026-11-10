@@ -18,7 +18,7 @@ depend on at least one of these columns and the scaled `x` on none.
 * `group`: further columns that, with `size`, identify a curve, e.g. `group=:u` when the
   data has one curve per size and value of `u`. Each point is compared with the master
   curve of all other curves. A column name or a tuple of them; by default, the curves are
-  the sizes.
+  the sizes. Names returned by [`to_table`](@ref) (`L`, `x`, `y`, ...) cannot be used.
 
 [`@ansatz`](@ref) builds the same from a formula.
 
@@ -49,6 +49,8 @@ struct Ansatz{P,F,C<:Tuple{Vararg{Symbol}},E<:NamedTuple}
     end
 end
 
+const TABLE_FIELDS = (:L, :x, :y, :y_err, :master_curve, :in_window)
+
 function Ansatz(f, params; x, errors, columns=(), size=:L, group=(), formula=nothing)
     param_names = Tuple(Symbol(p) for p in params)
     allunique(param_names) || throw(ArgumentError("parameter names must be unique"))
@@ -70,6 +72,10 @@ function Ansatz(f, params; x, errors, columns=(), size=:L, group=(), formula=not
     allunique(group) || throw(ArgumentError("`group` columns must be unique"))
     for c in group
         c in (x, size) && throw(ArgumentError("`group` cannot contain `x` or `size`"))
+        # `to_table` returns the group columns next to these.
+        if c in TABLE_FIELDS
+            throw(ArgumentError("`group` column `$c` clashes with an output of `to_table`"))
+        end
     end
     for c in (x, size, group...)
         haskey(errors, c) && throw(ArgumentError("column `$c` cannot have an error"))

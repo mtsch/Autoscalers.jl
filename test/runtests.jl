@@ -201,6 +201,12 @@ end
     @test endswith(sprint(show, ag), "group=(:u,))")
     @test_throws ArgumentError Ansatz(identity, (:a,); x=:t, errors=(; E=:dE), group=:t)
     @test_throws ArgumentError Ansatz(identity, (:a,); x=:t, errors=(; E=:dE), group=:E)
+    # names returned by `to_table`
+    for g in (:x, :L, :master_curve)
+        @test_throws r"clashes" Ansatz(
+            identity, (:a,); x=:t, size=:N, errors=(; E=:dE), group=g
+        )
+    end
 
     # the same scaling as the default ansatz gives the same cost
     g(L, x) = L^-0.25 * (1 + tanh(L * (x - 0.3)))
