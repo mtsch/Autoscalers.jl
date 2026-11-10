@@ -620,5 +620,6 @@ end
 end
 
 include("autoscale_reference.jl")
+include("bootstrap.jl")
 
 end # @testset "Autoscalers"

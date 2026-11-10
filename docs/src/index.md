@@ -11,3 +11,14 @@ Autoscaler
 cost_breakdown
 to_table
 ```
+
+### Fitting and error estimates
+
+```@docs
+fit_collapse
+bootstrap
+BootstrapResult
+confint(::BootstrapResult)
+stderror(::BootstrapResult)
+pvalue(::BootstrapResult, ::Pair{Symbol,<:Real}...)
+```
