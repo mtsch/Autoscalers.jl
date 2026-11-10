@@ -1,6 +1,6 @@
 using Autoscalers
 using Autoscalers: lerp, interpolate, extrapolate, master_curve, get_parameters,
-    free_parameter_names, window, transform!
+    free_parameter_names, window, transform!, standard_master_curve
 using Optim
 using Random
 using Test
@@ -439,5 +439,7 @@ end
     s(2.0, 0.5, 0.2)
     @test count(s.eval_mask) == n_before
 end
+
+include("autoscale_reference.jl")
 
 end # @testset "Autoscalers"
