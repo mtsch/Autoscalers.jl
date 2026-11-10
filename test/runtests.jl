@@ -139,7 +139,7 @@ end
     # zero-error rows are dropped with a warning, and the eval mask stays aligned
     bad = (; L=data.L, x=data.x, y=data.y, y_err=copy(data.y_err))
     bad.y_err[[1, 2, 15]] .= 0
-    s3 = @test_logs (:warn, r"zero errors") match_mode = :any Autoscaler(
+    s3 = @test_logs (:warn, r"3 rows with non-positive") match_mode = :any Autoscaler(
         bad; eval_window=(0.25, 0.75)
     )
     @test length(s3.x_val_raw) == 19
@@ -153,6 +153,9 @@ end
     @test get_parameters(s4, [0.1, 0.2]) == [1.5, 0.1, 0.2]
     @test_throws ArgumentError get_parameters(s4, [0.1])
     @test_throws ArgumentError s4(0.1)
+    p1 = get_parameters(s4, [0.1, 0.2])
+    get_parameters(s4, [0.3, 0.4])
+    @test p1 == [1.5, 0.1, 0.2]
 
     # remapped column names come from the ansatz
     renamed = (; size=data.L, t=data.x, val=data.y, val_err=data.y_err)
@@ -177,6 +180,52 @@ end
         d -> (; L=d.L, x=d.x .+ (d.L .== 6) .* 10, y=d.y, y_err=d.y_err);
         eval_window=(0.0, 1.0),
     )
+end
+
+@testset "Autoscaler input validation" begin
+    data = synthetic((L, x) -> x; sizes=[4, 6], xs=0:0.1:1)
+    allowmissing(v) = Vector{Union{Missing,eltype(v)}}(v)
+
+    m = map(allowmissing, data)
+    m.y[3] = missing
+    m.x[14] = missing
+    s = @test_logs (:warn, r"2 rows with missing") Autoscaler(m)
+    @test length(s.x_val_raw) == 20
+
+    nf = map(copy, data)
+    nf.y[1] = NaN
+    nf.y_err[2] = Inf
+    nf.x[20] = -Inf
+    s = @test_logs (:warn, r"3 rows with non-finite") Autoscaler(nf)
+    @test all(isfinite, s.y_val_raw)
+    @test all(isfinite, s.y_err_raw)
+    @test length(s.x_val_raw) == 19
+
+    neg = map(copy, data)
+    neg.y_err[5] = -0.1
+    s = @test_logs (:warn, r"1 rows with non-positive") Autoscaler(neg)
+    @test all(>(0), s.y_err_raw)
+
+    # each kind is reported on every construction, not just the first one
+    @test_logs (:warn, r"1 rows with non-positive") Autoscaler(neg)
+
+    # system sizes
+    @test Autoscaler((; data..., L=float.(data.L))).avail_sizes == [4, 6]
+    @test_throws ArgumentError Autoscaler((; data..., L=data.L .+ 0.5))
+    @test_throws ArgumentError Autoscaler((; data..., L=data.L .- 4))
+
+    # every size needs two usable points, also after filtering
+    one = (; L=[data.L; 8], x=[data.x; 0.5], y=[data.y; 0.5], y_err=[data.y_err; 1e-3])
+    @test_throws ArgumentError Autoscaler(one)
+    thin = map(copy, data)
+    thin.y_err[13:22] .= 0
+    @test_throws ArgumentError Autoscaler(thin)
+
+    # scaled x must be ascending within each size
+    rev = @ansatz L^b * y ~ L^a * (x_c - x)
+    s = Autoscaler(data, rev)
+    @test_throws ArgumentError s(1.0, 0.0, 0.5)
+    @test_throws ArgumentError to_table(s, 1.0, 0.0, 0.5)
 end
 
 @testset "window" begin
