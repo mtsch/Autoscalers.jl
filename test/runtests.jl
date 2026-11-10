@@ -204,6 +204,16 @@ end
     transform!(s, [1.0])
     @test s.y_err_scaled ≈ sqrt(2) .* data.y_err
 
+    # nonlinear propagation: σ(y²) = 2|y|σ(y), σ(y z) = sqrt((zσ_y)² + (yσ_z)²)
+    sq = Ansatz((:a,); x=:x, errors=(; y=:y_err, z=:z_err)) do row, p
+        return row.x, row.y^2 + row.y * row.z
+    end
+    zs = (; data..., z=fill(2.0, length(data.y)), z_err=fill(0.5, length(data.y)))
+    s = Autoscaler(zs, sq)
+    transform!(s, [0.0])
+    y, σy, z, σz = s.data.y, last(s.errors.y), s.data.z, last(s.errors.z)
+    @test s.y_err_scaled ≈ sqrt.(((2 .* y .+ z) .* σy) .^ 2 .+ (y .* σz) .^ 2)
+
     # the size column is passed as an integer
     int_size = Ansatz((); x=:x, errors=(; y=:y_err)) do row, p
         row.L isa Int || error("expected an integer size")
@@ -305,13 +315,13 @@ end
     nf.x[20] = -Inf
     s = @test_logs (:warn, r"3 rows with non-finite") Autoscaler(nf)
     @test all(isfinite, s.data.y)
-    @test all(isfinite, s.errors.y)
+    @test all(isfinite, last(s.errors.y))
     @test length(raw_x(s)) == 19
 
     neg = map(copy, data)
     neg.y_err[5] = -0.1
     s = @test_logs (:warn, r"1 rows with non-positive") Autoscaler(neg)
-    @test all(>(0), s.errors.y)
+    @test all(>(0), last(s.errors.y))
 
     # each kind is reported on every construction, not just the first one
     @test_logs (:warn, r"1 rows with non-positive") Autoscaler(neg)

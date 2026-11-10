@@ -5,9 +5,10 @@ Scaling ansatz given as a function. `f(row, p)` returns the scaled `(x, y)` of o
 point, where `row` is a `NamedTuple` with the columns `size`, `x`, the keys of `errors` and
 `columns`, and `p` is a `NamedTuple` of the parameters named in `params`.
 
-Columns listed in `errors` are passed as `Measurement`s carrying the error from their error
-column, so the uncertainty of the scaled `y` follows from error propagation. The scaled `y`
-must depend on at least one of them and the scaled `x` on none.
+Columns listed in `errors` are passed as ForwardDiff dual numbers that carry the error from
+their error column, so the uncertainty of the scaled `y` follows from first-order error
+propagation (independent errors). `f` must therefore accept any `Real`. The scaled `y` must
+depend on at least one of these columns and the scaled `x` on none.
 
 * `params`: parameter names, in the order the [`Autoscaler`](@ref) expects their values.
 * `x`: column with the unscaled `x`. Rows are sorted by it, and `eval_window` refers to it.
