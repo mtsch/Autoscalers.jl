@@ -41,6 +41,10 @@ end
 
 std_(v) = sqrt(sum(abs2, v .- sum(v) / length(v)) / (length(v) - 1))
 
+# names the `@ansatz` tests resolve in the calling module
+ansatz_test_scale(L) = 2L
+const ANSATZ_TEST_SHIFT = 0.5
+
 const COSTS = [
     "integral" => (;),
     "classic" => (; classic_cost_function=true),
@@ -92,33 +96,73 @@ const COSTS = [
 end
 
 @testset "@ansatz" begin
-    a = @ansatz L^b * y ~ L^a * (x - x_c)
+    a = @ansatz (a, b, x_c) -> :L^b * (:y ± :y_err) ~ :L^a * (:x - x_c)
     @test a.param_names == (:a, :b, :x_c)
+    @test (a.x, a.size, a.errors, a.columns) == (:x, :L, (; y=:y_err), (:L, :x, :y))
     @test a.f((; L=4, x=2.0, y=3.0), (; a=0.5, b=1.0, x_c=1.0)) == (2.0, 12.0)
-    @test (a.x, a.size, a.errors) == (:x, :L, (; y=:y_err))
-    @test sprint(show, a) == "@ansatz(L ^ b * y ~ L ^ a * (x - x_c))"
+    @test sprint(show, a) ==
+          "@ansatz((a, b, x_c)->:L ^ b * (:y ± :y_err) ~ :L ^ a * (:x - x_c))"
+
+    # parameters keep the declared order; a single one needs no parentheses
+    @test (@ansatz (x_c, b, a) -> :L^b * (:y ± :y_err) ~ :L^a * (:x - x_c)).param_names ==
+          (:x_c, :b, :a)
+    one = @ansatz x_c -> (:y ± :y_err) ~ :L * (:x - x_c)
+    @test one.param_names == (:x_c,)
+    @test one.f((; L=2, x=1.0, y=0.0), (; x_c=0.25)) == (1.5, 0.0)
 
     # x on the left-hand side (analytic background)
-    bg = @ansatz L^b * (y - A - B * (x - x_c)) ~ L^a * (x - x_c)
-    @test bg.param_names == (:A, :B, :a, :b, :x_c)
+    bg = @ansatz (A, B, a, b, x_c) -> :L^b * ((:y ± :y_err) - A - B * (:x - x_c)) ~
+        :L^a * (:x - x_c)
     p = (; A=1.0, B=2.0, a=0.0, b=0.0, x_c=1.0)
     @test bg.f((; L=1, x=2.0, y=10.0), p)[2] ≈ 10 - 1 - 2
 
-    # numeric literals are not parameters
-    fixed = @ansatz L^0.5 * y ~ L^1.5 * (x - x_c)
-    @test fixed.param_names == (:x_c,)
+    # other column names, the size column, and names that are not identifiers
+    r = @ansatz (a, t_c) -> (:E ± :dE) ~ :N^a * (:t - t_c) size=:N
+    @test (r.x, r.size, r.errors, r.columns) == (:t, :N, (; E=:dE), (:N, :t, :E))
+    sp = @ansatz t_c -> (:var"the y" ± :var"y err") ~ :var"sys size" * (:t - t_c) size =
+        :var"sys size"
+    @test sp.size == Symbol("sys size")
+    @test sp.errors == NamedTuple{(Symbol("the y"),)}((Symbol("y err"),))
 
-    # remaps
-    r = @ansatz L^b * y ~ L^a * (x - x_c) L => size x => t
-    @test (r.size, r.x, r.columns, r.errors) == (:size, :t, (:size, :t, :y), (; y=:y_err))
+    # x must be given when the right-hand side has several columns
+    h = @ansatz a -> (:y ± :y_err) ~ :L^a * :x + :h x=:x
+    @test (h.x, h.columns) == (:x, (:L, :x, :y, :h))
+    @test_throws ArgumentError @macroexpand @ansatz a -> (:y ± :y_err) ~ :L^a * :x + :h
+
+    # functions, constants and variables come from the calling scope; `$` copies a value
+    # once
+    shift = 1.0
+    g = @ansatz a -> (:y ± :y_err) ~
+        ansatz_test_scale(:L) * (:x - ANSATZ_TEST_SHIFT) + shift
+    s = @ansatz a -> (:y ± :y_err) ~ :x - $shift + π * 0
+    @test g.f((; L=2, x=1.0, y=0.0), (; a=0.0))[1] == 4 * 0.5 + 1.0
+    @test s.f((; L=2, x=1.0, y=0.0), (; a=0.0))[1] == 0.0
+    shift = 2.0
+    @test g.f((; L=2, x=1.0, y=0.0), (; a=0.0))[1] == 4 * 0.5 + 2.0
+    @test s.f((; L=2, x=1.0, y=0.0), (; a=0.0))[1] == 0.0
+
+    # qualified names stay names, dotted calls still see columns
+    q = @ansatz a -> (:y ± :y_err) ~ Base.sqrt(:L) * sqrt.(:x)
+    @test q.f((; L=4, x=9.0, y=0.0), (; a=0.0))[1] == 6.0
+
+    # several columns with errors
+    two = @ansatz a -> (:y ± :y_err) - (:z ± :z_err) ~ :L^a * :x
+    @test two.errors == (; y=:y_err, z=:z_err)
 
     # malformed input
-    @test_throws ArgumentError @macroexpand @ansatz L^b * y + L^a * x
-    @test_throws ArgumentError @macroexpand @ansatz L^b ~ L^a * (x - x_c)
-    @test_throws ArgumentError @macroexpand @ansatz L^b * y ~ L^a * x_c
-    @test_throws ArgumentError @macroexpand @ansatz L^b * y ~ L^a * (x - y)
-    @test_throws ArgumentError @macroexpand @ansatz L^b * y ~ L^a * x z => w
-    @test_throws ArgumentError @macroexpand @ansatz L^b * y ~ L^a * x L
+    @test_throws ArgumentError @macroexpand @ansatz :L^b * :y ~ :L^a * (:x - x_c)
+    @test_throws ArgumentError @macroexpand @ansatz L^b * y ~ L^a * (x - x_c)
+    @test_throws ArgumentError @macroexpand @ansatz (a, a) -> (:y ± :e) ~ :x
+    @test_throws ArgumentError @macroexpand @ansatz (a, 1) -> (:y ± :e) ~ :x
+    @test_throws ArgumentError @macroexpand @ansatz a -> (:y ± :e) + :x
+    @test_throws ArgumentError @macroexpand @ansatz a -> :y ~ :x
+    @test_throws ArgumentError @macroexpand @ansatz a -> (:y ± :e) ~ (:x ± :xe)
+    @test_throws ArgumentError @macroexpand @ansatz a -> (:y ± :e) ~ :x + :y
+    @test_throws ArgumentError @macroexpand @ansatz a -> (:y ± :e) + (:y ± :e) ~ :x
+    @test_throws ArgumentError @macroexpand @ansatz a -> (:y ± e) ~ :x
+    @test_throws ArgumentError @macroexpand @ansatz a -> (:y ± :e) ~ a(:x)
+    @test_throws ArgumentError @macroexpand @ansatz a -> (:y ± :e) ~ :x foo=:bar
+    @test_throws ArgumentError @macroexpand @ansatz a -> (:y ± :e) ~ :x size=L
 end
 
 @testset "Ansatz (function form)" begin
@@ -181,7 +225,7 @@ end
     @test s.avail_sizes == [4, 6]
     @test s.size_map == Dict(4 => 1:11, 6 => 12:22)
     @test free_parameter_names(s) == (:a, :b, :x_c)
-    @test sprint(show, s) == "Autoscaler(@ansatz(L ^ b * y ~ L ^ a * (x - x_c)))"
+    @test startswith(sprint(show, s), "Autoscaler(@ansatz((a, b, x_c)->")
 
     # rows are sorted by (L, x) regardless of input order
     perm = randperm(Xoshiro(1), length(data.x))
@@ -202,7 +246,7 @@ end
     @test count(s3.eval_mask) == 9
 
     # hardcoded parameters
-    s4 = Autoscaler(data; a=1.5)
+    s4 = Autoscaler(data; fix=(; a=1.5))
     @test free_parameter_names(s4) == (:b, :x_c)
     @test get_parameters(s4, [0.1, 0.2]) == [1.5, 0.1, 0.2]
     @test_throws ArgumentError get_parameters(s4, [0.1])
@@ -213,13 +257,15 @@ end
 
     # remapped column names come from the ansatz
     renamed = (; size=data.L, t=data.x, val=data.y, val_err=data.y_err)
-    ans = @ansatz L^b * y ~ L^a * (x - x_c) L => size x => t y => val y_err => val_err
+    ans = @ansatz (a, b, x_c) -> :size^b * (:val ± :val_err) ~ :size^a * (:t - x_c) size =
+        :size
     s5 = Autoscaler(renamed, ans)
     @test raw_x(s5) == raw_x(s)
     @test s5.data.val == s.data.y
 
     # invalid input
-    @test_throws ArgumentError Autoscaler(data; c=1.0)
+    @test_throws ArgumentError Autoscaler(data; fix=(; c=1.0))
+    @test_throws ArgumentError Autoscaler(data; fix=Dict(:a => 1.0))
     @test_throws ArgumentError Autoscaler(synthetic((L, x) -> x; sizes=[4], xs=0:0.1:1))
     @test_throws ArgumentError Autoscaler(data; eval_window=(2.0, 3.0))
     @test_throws ArgumentError Autoscaler(data; eval_window=(0.5, 0.4))
@@ -278,7 +324,7 @@ end
     @test_throws ArgumentError Autoscaler(dup)
 
     # scaled x must be ascending within each size
-    rev = @ansatz L^b * y ~ L^a * (x_c - x)
+    rev = @ansatz (a, b, x_c) -> :L^b * (:y ± :y_err) ~ :L^a * (x_c - :x)
     s = Autoscaler(data, rev)
     @test_throws ArgumentError s(1.0, 0.0, 0.5)
     @test_throws ArgumentError to_table(s, 1.0, 0.0, 0.5)
@@ -450,7 +496,7 @@ end
     g(L, x) = L^(-b0) * exp(-(L^a0 * x - 1)^2)
     xs = range(-0.1, 0.3; length=201)
     data = synthetic(g; sizes=[4, 6, 8, 10], xs, σ=1e-3)
-    s = Autoscaler(data; a=a0, eval_window=(0.0, 0.1))
+    s = Autoscaler(data; fix=(; a=a0), eval_window=(0.0, 0.1))
     @test free_parameter_names(s) == (:b, :x_c)
     p, _ = fit(s, [-0.3, 0.01])
     @test p[1] ≈ b0 atol = 0.02
@@ -468,7 +514,8 @@ end
     win = (xc0 - 0.004, xc0 + 0.004)
 
     @testset "fixed exponents (literals in the ansatz)" begin
-        ans = @ansatz L^0.0225 * (y - A - B * (x - x_c)) ~ L^1.48876 * (x - x_c)
+        ans = @ansatz (A, B, x_c) -> :L^0.0225 * ((:y ± :y_err) - A - B * (:x - x_c)) ~
+            :L^1.48876 * (:x - x_c)
         @test ans.param_names == (:A, :B, :x_c)
         s = Autoscaler(data, ans; eval_window=win)
         p, c = fit(s, [0.28, -0.6, 0.0605])
@@ -482,8 +529,9 @@ end
     end
 
     @testset "free crossover exponent" begin
-        ans = @ansatz L^b * (y - A - B * (x - x_c)) ~ L^a * (x - x_c)
-        s = Autoscaler(data, ans; b=y0, eval_window=win)
+        ans = @ansatz (A, B, a, b, x_c) -> :L^b * ((:y ± :y_err) - A - B * (:x - x_c)) ~
+            :L^a * (:x - x_c)
+        s = Autoscaler(data, ans; fix=(; b=y0), eval_window=win)
         @test free_parameter_names(s) == (:A, :B, :a, :x_c)
         p, _ = fit(s, [0.29, -0.7, 1.3, 0.0600])
         @test p[3] ≈ inv_ν atol = 0.1
@@ -496,7 +544,8 @@ end
         bgdata = (; data.L, data.x, y=data.y .- A0, data.y_err)
         simple = Autoscaler(bgdata; eval_window=win)
         p_s, c_s = fit(simple, [1.0, 0.0, 0.0600])
-        ans = @ansatz L^0.0225 * (y - A - B * (x - x_c)) ~ L^1.48876 * (x - x_c)
+        ans = @ansatz (A, B, x_c) -> :L^0.0225 * ((:y ± :y_err) - A - B * (:x - x_c)) ~
+            :L^1.48876 * (:x - x_c)
         full = Autoscaler(bgdata, ans; eval_window=win)
         _, c_f = fit(full, [0.0, -0.6, 0.0605])
         @test p_s[1] < inv_ν - 0.2
