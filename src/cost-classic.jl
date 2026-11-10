@@ -1,21 +1,22 @@
 # Classic cost function of Houdayer & Hartmann, Phys. Rev. B 70, 014418 (2004),
 # https://doi.org/10.1103/PhysRevB.70.014418, Appendix A: every point is compared to a
-# weighted linear fit through the neighbouring points of all other sizes.
+# weighted linear fit through the neighbouring points of all other curves (sizes in the
+# paper).
 
 """
-    select_subset(c::Autoscaler, selected_x, selected_size)
+    select_subset(c::Autoscaler, selected_x, selected_curve)
 
-From every size other than `selected_size`, select the two neighbouring points `j, j + 1`
-with `x[j] ≤ selected_x ≤ x[j + 1]`, or nothing if that size does not bracket `selected_x`
+From every curve other than `selected_curve`, select the two neighbouring points `j, j + 1`
+with `x[j] ≤ selected_x ≤ x[j + 1]`, or nothing if that curve does not bracket `selected_x`
 ([Houdayer & Hartmann (2004)](https://doi.org/10.1103/PhysRevB.70.014418), Appendix A).
 """
-function select_subset(c::Autoscaler, selected_x, selected_size)
+function select_subset(c::Autoscaler, selected_x, selected_curve)
     empty!(c.selected_x_val)
     empty!(c.selected_y_val)
     empty!(c.selected_y_err)
-    for size in c.avail_sizes
-        size == selected_size && continue
-        x, y, y_err = scaled_data(c, size)
+    for curve in 1:n_curves(c)
+        curve == selected_curve && continue
+        x, y, y_err = scaled_data(c, curve)
         n = length(x)
         j = searchsortedlast(x, selected_x)
         # On an interior knot both adjacent pairs bracket `selected_x`; the pair starting at
@@ -34,14 +35,14 @@ function select_subset(c::Autoscaler, selected_x, selected_size)
 end
 
 """
-    standard_master_curve(c::Autoscaler, selected_x, selected_size)
+    standard_master_curve(c::Autoscaler, selected_x, selected_curve)
 
-Weighted linear fit through the neighbours of `selected_x` in all other sizes, evaluated at
-`selected_x` (Eqs. A2 and A3). Returns `(Y, dY2)` or `missing` if no other size brackets
+Weighted linear fit through the neighbours of `selected_x` in all other curves, evaluated at
+`selected_x` (Eqs. A2 and A3). Returns `(Y, dY2)` or `missing` if no other curve brackets
 `selected_x`.
 """
-function standard_master_curve(c::Autoscaler, selected_x, selected_size)
-    x, y, y_err = select_subset(c, selected_x, selected_size)
+function standard_master_curve(c::Autoscaler, selected_x, selected_curve)
+    x, y, y_err = select_subset(c, selected_x, selected_curve)
     isempty(x) && return missing
 
     weights = y_err
@@ -77,7 +78,7 @@ function standard_cost_function(c::Autoscaler, params)
     s = 0.0
     n = 0
     for i in eachindex(c.x_val_scaled)
-        master = standard_master_curve(c, c.x_val_scaled[i], c.sizes[i])
+        master = standard_master_curve(c, c.x_val_scaled[i], c.curve[i])
         if !ismissing(master)
             Y, dY2 = master
             s += (c.y_val_scaled[i] - Y)^2 / (c.y_err_scaled[i]^2 + dY2)

@@ -1,9 +1,9 @@
 """
-    Ansatz(f, params; x, errors, columns=(), size=:L)
+    Ansatz(f, params; x, errors, columns=(), size=:L, group=())
 
 Scaling ansatz given as a function. `f(row, p)` returns the scaled `(x, y)` of one data
-point, where `row` is a `NamedTuple` with the columns `size`, `x`, the keys of `errors` and
-`columns`, and `p` is a `NamedTuple` of the parameters named in `params`.
+point, where `row` is a `NamedTuple` with the columns `size`, `group`, `x`, the keys of
+`errors` and `columns`, and `p` is a `NamedTuple` of the parameters named in `params`.
 
 Columns listed in `errors` are passed as ForwardDiff dual numbers that carry the error from
 their error column, so the uncertainty of the scaled `y` follows from first-order error
@@ -15,6 +15,10 @@ depend on at least one of these columns and the scaled `x` on none.
 * `errors`: `NamedTuple` mapping columns to their error columns, e.g. `(; E=:dE)`.
 * `columns`: further columns used by `f`.
 * `size`: column with the system size. Its values are passed as integers.
+* `group`: further columns that, with `size`, identify a curve, e.g. `group=:u` when the
+  data has one curve per size and value of `u`. Each point is compared with the master
+  curve of all other curves. A column name or a tuple of them; by default, the curves are
+  the sizes.
 
 [`@ansatz`](@ref) builds the same from a formula.
 
@@ -33,16 +37,19 @@ struct Ansatz{P,F,C<:Tuple{Vararg{Symbol}},E<:NamedTuple}
     errors::E
     x::Symbol
     size::Symbol
+    group::Tuple{Vararg{Symbol}}
     formula::Union{Nothing,String}
 
     # The parameter names are also a type parameter so that the `NamedTuple` of parameters
     # passed to `f` is type-stable.
-    function Ansatz{P}(f::F, columns::C, errors::E, x, size, formula) where {P,F,C,E}
-        return new{P,F,C,E}(f, P, columns, errors, x, size, formula)
+    function Ansatz{P}(
+        f::F, columns::C, errors::E, x, size, group, formula
+    ) where {P,F,C,E}
+        return new{P,F,C,E}(f, P, columns, errors, x, size, group, formula)
     end
 end
 
-function Ansatz(f, params; x, errors, columns=(), size=:L, formula=nothing)
+function Ansatz(f, params; x, errors, columns=(), size=:L, group=(), formula=nothing)
     param_names = Tuple(Symbol(p) for p in params)
     allunique(param_names) || throw(ArgumentError("parameter names must be unique"))
     x = Symbol(x)
@@ -55,21 +62,33 @@ function Ansatz(f, params; x, errors, columns=(), size=:L, formula=nothing)
         ))
     end
     errors = map(Symbol, errors)
-    for c in (x, size)
+    if group isa Union{Symbol,AbstractString}
+        group = (Symbol(group),)
+    else
+        group = Tuple(Symbol.(group))
+    end
+    allunique(group) || throw(ArgumentError("`group` columns must be unique"))
+    for c in group
+        c in (x, size) && throw(ArgumentError("`group` cannot contain `x` or `size`"))
+    end
+    for c in (x, size, group...)
         haskey(errors, c) && throw(ArgumentError("column `$c` cannot have an error"))
     end
-    cols = Tuple(unique!([size, x, Symbol.(collect(columns))..., keys(errors)...]))
+    cols = [size, group..., x, Symbol.(collect(columns))..., keys(errors)...]
+    cols = Tuple(unique!(cols))
     for e in errors
         e in cols && throw(ArgumentError("error column `$e` is also used as a value"))
     end
-    return Ansatz{param_names}(f, cols, errors, x, size, formula)
+    return Ansatz{param_names}(f, cols, errors, x, size, group, formula)
 end
 
 function Base.show(io::IO, a::Ansatz)
     if isnothing(a.formula)
         print(io, "Ansatz(", a.f, ", ", a.param_names, "; x=", repr(a.x))
         print(io, ", errors=", a.errors, ", columns=", a.columns)
-        print(io, ", size=", repr(a.size), ")")
+        print(io, ", size=", repr(a.size))
+        isempty(a.group) || print(io, ", group=", a.group)
+        print(io, ")")
     else
         print(io, "@ansatz(", a.formula, ")")
     end
@@ -149,8 +168,18 @@ function rewrite_callee(f, ctx::AnsatzContext)
     return rewrite(f, ctx)
 end
 
+function column_option(value, opt)
+    if value isa QuoteNode && value.value isa Symbol
+        return value.value
+    elseif value isa String
+        return Symbol(value)
+    else
+        throw(ArgumentError("expected a column name such as `:L` in `$opt`"))
+    end
+end
+
 """
-    @ansatz (params...) -> lhs ~ rhs [size=:L] [x=:col]
+    @ansatz (params...) -> lhs ~ rhs [size=:L] [x=:col] [group=:col]
 
 Define a scaling [`Ansatz`](@ref): the collapse is sought for `lhs` (the scaled `y`) as a
 function of `rhs` (the scaled `x`).
@@ -166,7 +195,10 @@ function of `rhs` (the scaled `x`).
   calling scope.
 * `size` names the column with the system size (default `:L`).
 * `x` names the column with the unscaled `x`, which the data are sorted by and `eval_window`
-  refers to. By default it is the only column on the right-hand side besides `size`.
+  refers to. By default it is the only column on the right-hand side besides `size` and
+  `group`.
+* `group` names further columns (one, or a tuple) that, with `size`, identify a curve; see
+  [`Ansatz`](@ref).
 
 # Examples
 
@@ -177,6 +209,10 @@ function of `rhs` (the scaled `x`).
 ν = 0.75
 @ansatz (A, B, t_c) -> :N^0.1 * ((:E ± :dE) - A - B * (:t - t_c)) ~
     :N^(1/\$ν) * (:t - t_c) size=:N
+
+# one curve per size and value of `u`, sharing one master curve
+@ansatz (α, β, t_c) -> :L^0.1 * ((:E ± :dE) - :u - α * :u^2 - β * (:t - t_c) * :u^2) ~
+    :L^1.5 * (:t - t_c) group=:u
 ```
 """
 macro ansatz(lambda, options...)
@@ -210,22 +246,22 @@ macro ansatz(lambda, options...)
 
     size = :L
     x = nothing
+    group = Symbol[]
     for opt in options
-        if !(opt isa Expr && opt.head == :(=) && opt.args[1] in (:size, :x))
-            throw(ArgumentError("unknown option `$opt`; expected `size=:col` or `x=:col`"))
+        if !(opt isa Expr && opt.head == :(=) && opt.args[1] in (:size, :x, :group))
+            throw(ArgumentError(
+                "unknown option `$opt`; expected `size=:col`, `x=:col` or `group=:col`"
+            ))
         end
         value = opt.args[2]
-        if value isa QuoteNode && value.value isa Symbol
-            name = value.value
-        elseif value isa String
-            name = Symbol(value)
+        if opt.args[1] ≡ :group && value isa Expr && value.head == :tuple
+            group = column_option.(value.args, Ref(opt))
+        elseif opt.args[1] ≡ :group
+            group = [column_option(value, opt)]
+        elseif opt.args[1] ≡ :size
+            size = column_option(value, opt)
         else
-            throw(ArgumentError("expected a column name such as `:L` in `$opt`"))
-        end
-        if opt.args[1] ≡ :size
-            size = name
-        else
-            x = name
+            x = column_option(value, opt)
         end
     end
 
@@ -251,7 +287,7 @@ macro ansatz(lambda, options...)
         ))
     end
     if isnothing(x)
-        candidates = unique(filter(≠(size), rhs_columns))
+        candidates = unique(filter(c -> c ≠ size && c ∉ group, rhs_columns))
         if length(candidates) ≠ 1
             throw(ArgumentError(
                 "cannot tell which column is `x` among $(Tuple(candidates)); " *
@@ -275,6 +311,7 @@ macro ansatz(lambda, options...)
         errors=NamedTuple{$error_names}($error_columns),
         columns=$columns,
         size=$(QuoteNode(size)),
+        group=$(Tuple(group)),
         formula=$shown,
     ))
     if isempty(ctx.interpolations)

@@ -1,18 +1,18 @@
 # Fixed-window cost function: a fixed set of points, chosen in raw `x`, is compared to the
-# master curve of the other sizes. Extrapolation beyond a curve's data is penalised smoothly,
+# master curve of the other curves. Extrapolation beyond a curve's data is penalised smoothly,
 # so the cost is continuous in the parameters and cannot be lowered by moving the window.
 
 """
-    fixed_master_curve(a::Autoscaler, x, own_size)
+    fixed_master_curve(a::Autoscaler, x, own_curve)
 
-Error-weighted master curve at scaled `x`, built from all sizes except `own_size`
+Error-weighted master curve at scaled `x`, built from all curves except `own_curve`
 (unless `a.use_all_sizes`), extrapolating where needed. Returns `(; Y, dY2, penalty)`.
 """
-function fixed_master_curve(a::Autoscaler, x, own_size)
+function fixed_master_curve(a::Autoscaler, x, own_curve)
     num = den = pen = 0.0
-    for L in a.avail_sizes
-        (!a.use_all_sizes && L == own_size) && continue
-        xs, ys, dys = scaled_data(a, L)
+    for c in 1:n_curves(a)
+        (!a.use_all_sizes && c == own_curve) && continue
+        xs, ys, dys = scaled_data(a, c)
         y, dy2, d = extrapolate(xs, ys, dys, x)
         w = 1 / dy2
         num += w * y
@@ -26,19 +26,19 @@ end
     fixed_window_breakdown(a::Autoscaler, params)
 
 Fixed-window cost, split into the collapse (χ²-like) part and the extrapolation penalty.
-Each size contributes the mean over its scored points; the result is averaged over sizes
+Each curve contributes the mean over its scored points; the result is averaged over curves
 with at least one scored point.
 """
 function fixed_window_breakdown(a::Autoscaler, params)
     transform!(a, params)
     chi2_total = pen_total = 0.0
-    n_sizes = 0
-    for L in a.avail_sizes
+    n_curves = 0
+    for (c, range) in enumerate(a.curve_ranges)
         chi2 = pen = 0.0
         n = 0
-        for i in a.size_map[L]
+        for i in range
             a.eval_mask[i] || continue
-            m = fixed_master_curve(a, a.x_val_scaled[i], L)
+            m = fixed_master_curve(a, a.x_val_scaled[i], c)
             chi2 += (a.y_val_scaled[i] - m.Y)^2 / (a.y_err_scaled[i]^2 + m.dY2)
             pen += m.penalty
             n += 1
@@ -46,12 +46,12 @@ function fixed_window_breakdown(a::Autoscaler, params)
         n == 0 && continue
         chi2_total += chi2 / n
         pen_total += pen / n
-        n_sizes += 1
+        n_curves += 1
     end
     return (;
-        cost=(chi2_total + pen_total) / n_sizes,
-        chi2=chi2_total / n_sizes,
-        penalty=pen_total / n_sizes,
+        cost=(chi2_total + pen_total) / n_curves,
+        chi2=chi2_total / n_curves,
+        penalty=pen_total / n_curves,
     )
 end
 
