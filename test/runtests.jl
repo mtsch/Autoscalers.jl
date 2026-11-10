@@ -1,6 +1,6 @@
 using Autoscalers
 using Autoscalers: lerp, interpolate, extrapolate, master_curve, get_parameters,
-    free_parameter_names, window, transform!, standard_master_curve
+    free_parameter_names, window, transform!, select_subset, standard_master_curve
 using Optim
 using Random
 using Test
@@ -221,11 +221,53 @@ end
     thin.y_err[13:22] .= 0
     @test_throws ArgumentError Autoscaler(thin)
 
+    # duplicate (L, x) rows, also when they are not adjacent in the input
+    dup = (; L=[data.L; 6], x=[data.x; 0.3], y=[data.y; 0.3], y_err=[data.y_err; 1e-3])
+    @test_throws ArgumentError Autoscaler(dup)
+
     # scaled x must be ascending within each size
     rev = @ansatz L^b * y ~ L^a * (x_c - x)
     s = Autoscaler(data, rev)
     @test_throws ArgumentError s(1.0, 0.0, 0.5)
     @test_throws ArgumentError to_table(s, 1.0, 0.0, 0.5)
+end
+
+@testset "classic cost: Houdayer & Hartmann reference" begin
+    # Reference values from an independent matrix least-squares fit (numpy) of the points
+    # selected according to Appendix A of PRB 70, 014418. With a = b = x_c = 0 the
+    # scaling is the identity.
+    data = (;
+        L=[4, 4, 4, 6, 6, 8, 8],
+        x=[0.0, 1.0, 2.0, 0.5, 2.0, 1.0, 3.0],
+        y=[0.0, 1.0, 2.0, 0.4, 2.2, 1.1, 2.9],
+        y_err=[0.1, 0.1, 0.1, 0.2, 0.2, 0.1, 0.3],
+    )
+    s = Autoscaler(data; classic_cost_function=true)
+    transform!(s, [0.0, 0.0, 0.0])
+
+    # (L, x) => (number of selected points, Y, dY²); nothing brackets L=4, x=0 or L=8, x=3
+    expected = [
+        (4, 1.0) => (4, 1.065718799368088, 0.006887835703001581),
+        (4, 2.0) => (4, 2.088783570300158, 0.015229067930489736),
+        (6, 0.5) => (2, 0.5, 0.005),
+        (6, 2.0) => (4, 1.992592592592594, 0.007037037037037043),
+        (8, 1.0) => (4, 0.98139534883721, 0.006511627906976748),
+    ]
+    for ((L, x), (n, Y, dY2)) in expected
+        @test length(select_subset(s, x, L)[1]) == n
+        m = standard_master_curve(s, x, L)
+        @test m[1] ≈ Y
+        @test m[2] ≈ dY2
+    end
+    @test ismissing(standard_master_curve(s, 0.0, 4))
+    @test ismissing(standard_master_curve(s, 3.0, 8))
+    @test s(0.0, 0.0, 0.0) ≈ 0.5113810925012936
+
+    # x = 2 coincides with the last point of L=6: the closed bracket x[j] ≤ x ≤ x[j + 1]
+    # selects (0.5, 2.0) from L=6, while L=8 brackets it with (1.0, 3.0).
+    @test select_subset(s, 2.0, 4)[1] == [0.5, 2.0, 1.0, 3.0]
+    # on an interior knot, the pair starting at the knot is used
+    @test select_subset(s, 1.0, 6)[1] == [1.0, 2.0, 1.0, 3.0]
 end
 
 @testset "window" begin
