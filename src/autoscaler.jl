@@ -6,7 +6,7 @@
         window_width=1,
         eval_window=nothing,
         penalty=100.0,
-        params...
+        fix=(;),
     )
 
 Prepare `table` for finite-size scaling with `ansatz`. Calling the result with the free
@@ -23,7 +23,8 @@ parameters (in the order of `ansatz.param_names`, skipping hardcoded ones) retur
   Points outside it still serve as interpolation knots. Where another size does not cover a
   point's scaled `x`, its curve is extrapolated linearly and a smooth penalty `penalty * d^2`
   is added (`d` = distance outside, in units of that size's scaled range).
-* `params...`: hardcode parameters by name, e.g. `a = 1/ν`.
+* `fix`: `NamedTuple` of parameters held at fixed values, e.g. `fix=(; a=1/ν)`. They are
+  left out of the arguments of the cost function.
 
 Only the columns used by `ansatz` are read. Rows with missing or non-finite values in them,
 or with a non-positive error, are skipped with a warning. System sizes must be positive
@@ -80,12 +81,13 @@ function Autoscaler(
     window_width=1,
     eval_window=nothing,
     penalty=100.0,
-    kwargs...
+    fix=(;),
 )
-    for (k, _) in kwargs
-        if k ∉ ansatz.param_names
-            throw(ArgumentError("unrecognized keyword argument `$k`"))
-        end
+    if !(fix isa NamedTuple)
+        throw(ArgumentError("`fix` must be a `NamedTuple`, e.g. `(; a=1.5)`"))
+    end
+    for k in keys(fix)
+        k in ansatz.param_names || throw(ArgumentError("`$k` in `fix` is not a parameter"))
     end
     if !isnothing(eval_window) && classic_cost_function
         throw(ArgumentError("`eval_window` and `classic_cost_function` are mutually exclusive"))
@@ -189,12 +191,12 @@ function Autoscaler(
         classic_cost_function, use_all_sizes, Float64(window_width),
         ew, eval_mask, Float64(penalty),
     )
-    return hardcode_params!(result; kwargs...)
+    return hardcode_params!(result, fix)
 end
 
-function hardcode_params!(a::Autoscaler; kwargs...)
+function hardcode_params!(a::Autoscaler, fix::NamedTuple)
     for (i, p) in enumerate(a.ansatz.param_names)
-        a.hardcodes[i] = get(kwargs, p, NaN)
+        a.hardcodes[i] = get(fix, p, NaN)
     end
     return a
 end
