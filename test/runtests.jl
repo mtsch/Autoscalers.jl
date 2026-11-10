@@ -482,4 +482,6 @@ end
     @test count(s.eval_mask) == n_before
 end
 
+include("autoscale_reference.jl")
+
 end # @testset "Autoscalers"
