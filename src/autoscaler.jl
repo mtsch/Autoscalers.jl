@@ -14,8 +14,9 @@ Prepare `table` for finite-size scaling with `ansatz`. Calling the result with t
 parameters (in the order of `ansatz.param_names`, skipping hardcoded ones) returns the cost.
 
 * `x`, `y`, `y_err`, `L`: column names. Defaults are taken from the remaps of `ansatz`.
-* `classic_cost_function`: use the Houdayer–Hartmann cost (per-point, local linear master
-  curve) instead of the integral cost.
+* `classic_cost_function`: use the cost function of
+  [Houdayer & Hartmann (2004)](https://doi.org/10.1103/PhysRevB.70.014418) (per-point,
+  local linear master curve) instead of the integral cost.
 * `use_all_sizes`: include a curve's own size when building the master curve it is compared
   to (default: leave it out).
 * `window_width`: fraction of the scaled overlap window used by the integral cost.
@@ -27,10 +28,17 @@ parameters (in the order of `ansatz.param_names`, skipping hardcoded ones) retur
 * `params...`: hardcode parameters by name, e.g. `a = 1/ν`.
 
 Rows with missing or non-finite values, or with `y_err ≤ 0`, are skipped with a warning.
-System sizes must be positive integers, and each size needs at least two usable rows.
+System sizes must be positive integers, each size needs at least two usable rows, and
+no two rows may share the same `L` and `x`.
 
 The `Autoscaler` reuses internal buffers between calls, so a single instance must not be
 evaluated from several threads at once.
+
+# References
+
+- J. Houdayer and A. K. Hartmann, *Low-temperature behavior of two-dimensional Gaussian
+  Ising spin glasses*, Phys. Rev. B **70**, 014418 (2004),
+  [doi:10.1103/PhysRevB.70.014418](https://doi.org/10.1103/PhysRevB.70.014418).
 """
 struct Autoscaler{P,S<:ScalingAnsatz{P}}
     ansatz::S
@@ -133,6 +141,9 @@ function Autoscaler(
             push!(avail_sizes, curr_size)
             prev_size = curr_size
             start_index = i
+        elseif row[x] == last(x_val_raw)
+            # Interpolation and the classic cost need strictly increasing x within a size.
+            throw(ArgumentError("duplicate rows for L=$curr_size, `$x`=$(row[x])"))
         end
         push!(x_val_raw, row[x])
         push!(y_val_raw, row[y])

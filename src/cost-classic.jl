@@ -1,6 +1,14 @@
-# Classic cost function of Houdayer & Hartmann, PRB 70, 014418 (2004): every point is
-# compared to a weighted linear fit through the neighbouring points of all other sizes.
+# Classic cost function of Houdayer & Hartmann, Phys. Rev. B 70, 014418 (2004),
+# https://doi.org/10.1103/PhysRevB.70.014418, Appendix A: every point is compared to a
+# weighted linear fit through the neighbouring points of all other sizes.
 
+"""
+    select_subset(c::Autoscaler, selected_x, selected_size)
+
+From every size other than `selected_size`, select the two neighbouring points `j, j + 1`
+with `x[j] ≤ selected_x ≤ x[j + 1]`, or nothing if that size does not bracket `selected_x`
+([Houdayer & Hartmann (2004)](https://doi.org/10.1103/PhysRevB.70.014418), Appendix A).
+"""
 function select_subset(c::Autoscaler, selected_x, selected_size)
     empty!(c.selected_x_val)
     empty!(c.selected_y_val)
@@ -8,17 +16,19 @@ function select_subset(c::Autoscaler, selected_x, selected_size)
     for size in c.avail_sizes
         size == selected_size && continue
         x, y, y_err = scaled_data(c, size)
-        for i in eachindex(x)
-            isnan(x[i]) && continue
-            if x[i] > selected_x
-                if i > 1 && !isnan(x[i-1])
-                    append!(c.selected_x_val, (x[i-1], x[i]))
-                    append!(c.selected_y_val, (y[i-1], y[i]))
-                    append!(c.selected_y_err, (y_err[i-1], y_err[i]))
-                end
-                break
-            end
+        n = length(x)
+        j = searchsortedlast(x, selected_x)
+        # On an interior knot both adjacent pairs bracket `selected_x`; the pair starting at
+        # the knot matches the reference implementation (autoScale). On the last knot only
+        # the pair ending there does.
+        if j == n && x[n] == selected_x
+            j = n - 1
+        elseif j == 0 || j == n
+            continue
         end
+        append!(c.selected_x_val, (x[j], x[j + 1]))
+        append!(c.selected_y_val, (y[j], y[j + 1]))
+        append!(c.selected_y_err, (y_err[j], y_err[j + 1]))
     end
     return c.selected_x_val, c.selected_y_val, c.selected_y_err
 end
@@ -27,7 +37,8 @@ end
     standard_master_curve(c::Autoscaler, selected_x, selected_size)
 
 Weighted linear fit through the neighbours of `selected_x` in all other sizes, evaluated at
-`selected_x`. Returns `(Y, dY2)` or `missing` if no other size brackets `selected_x`.
+`selected_x` (Eqs. A2 and A3). Returns `(Y, dY2)` or `missing` if no other size brackets
+`selected_x`.
 """
 function standard_master_curve(c::Autoscaler, selected_x, selected_size)
     x, y, y_err = select_subset(c, selected_x, selected_size)
@@ -49,6 +60,18 @@ function standard_master_curve(c::Autoscaler, selected_x, selected_size)
     return Y, dY2
 end
 
+"""
+    standard_cost_function(c::Autoscaler, params)
+
+Quality `S` of Eq. A1: the mean of `(y - Y)^2 / (dy^2 + dY^2)` over all points for which the
+master curve is defined. `Inf` if it is defined for none.
+
+# References
+
+- J. Houdayer and A. K. Hartmann, *Low-temperature behavior of two-dimensional Gaussian
+  Ising spin glasses*, Phys. Rev. B **70**, 014418 (2004),
+  [doi:10.1103/PhysRevB.70.014418](https://doi.org/10.1103/PhysRevB.70.014418).
+"""
 function standard_cost_function(c::Autoscaler, params)
     transform!(c, params)
     s = 0.0
