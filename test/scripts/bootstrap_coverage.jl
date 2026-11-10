@@ -20,6 +20,10 @@ function dataset(rng; sizes=[8, 16, 32], xs=range(0.2, 0.4; length=41), σ=2e-3)
     return (; L, x, y, y_err=fill(σ, length(x)))
 end
 
+# Inside the range all sizes cover at the truth, 0.1 / (32 / 8)^a = 0.025 around x_c, so
+# that no curve has to be extrapolated; beyond it, linear extrapolation biases the fit.
+const WINDOW = (0.28, 0.32)
+
 # Binomial standard error of an observed fraction, to judge the deviations.
 binomial_se(p, n) = sqrt(p * (1 - p) / n)
 
@@ -31,7 +35,7 @@ function main(n_datasets, n_replicates; n_null=max(1, n_datasets ÷ 4))
     rejected_percentile = Dict(name => 0 for name in names)
     rejected_null = 0
     for k in 1:n_datasets
-        s = Autoscaler(dataset(rng); eval_window=(0.27, 0.33))
+        s = Autoscaler(dataset(rng); eval_window=WINDOW)
         estimate = fit_collapse(s, [1.1, 0.2, 0.31]).params
         b = bootstrap(s, estimate; n=n_replicates, rng, progress=false)
         for level in levels
