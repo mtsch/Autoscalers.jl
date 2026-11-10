@@ -194,7 +194,12 @@ struct BootstrapResult{A<:Autoscaler,M,O}
     options::O
 end
 
-converged_samples(b::BootstrapResult) = b.samples[b.converged, :]
+function converged_samples(b::BootstrapResult)
+    if !any(b.converged)
+        throw(ArgumentError("no bootstrap replicate converged, so there is nothing to use"))
+    end
+    return b.samples[b.converged, :]
+end
 
 function Base.show(io::IO, b::BootstrapResult)
     n = length(b.converged)
@@ -235,6 +240,7 @@ function bootstrap(
     n=1000, rng=Random.default_rng(), parallel=true, progress=true,
     method=default_fit_method(), options=default_fit_options(),
 )
+    n ≥ 1 || throw(ArgumentError("`n` must be positive"))
     names = free_parameter_names(a)
     estimate = Float64.(collect(estimate))
     if length(estimate) ≠ length(names)
@@ -354,11 +360,17 @@ function null_pvalue(
     b::BootstrapResult, hypotheses;
     n=length(b.converged), rng=Random.default_rng(), parallel=true, progress=true,
 )
+    n ≥ 1 || throw(ArgumentError("`n` must be positive"))
     a = b.autoscaler
     constrained = with_fixed(a, hypotheses)
     fixed_names = first.(hypotheses)
     free = [i for (i, name) in enumerate(b.param_names) if name ∉ fixed_names]
     fit = fit_collapse(constrained, b.estimate[free]; b.method, b.options)
+    if !fit.converged
+        throw(ArgumentError(
+            "the fit under the hypothesis did not converge; adjust `options` of `bootstrap`"
+        ))
+    end
     observed = fit.cost - a(b.estimate)
 
     # Start the unconstrained fits from the constrained solution, which lies on the null.
@@ -380,7 +392,9 @@ function null_pvalue(
     end
     statistics = filter(!isnan, statistics)
     n_failed = n - length(statistics)
-    if n_failed > 0
+    if isempty(statistics)
+        throw(ArgumentError("no bootstrap test replicate converged"))
+    elseif n_failed > 0
         @warn "$n_failed of $n bootstrap test replicates did not converge and are left out."
     end
     return (1 + count(≥(observed), statistics)) / (length(statistics) + 1)

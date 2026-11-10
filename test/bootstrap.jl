@@ -33,7 +33,9 @@
             # only the first column with errors is replaced
             @test model.x == s.data.x
         end
-        flat = Ansatz((row, p) -> (row.x, row.y - row.y + p.c), (:c,); x=:x, errors=(; y=:y_err))
+        flat = Ansatz((:c,); x=:x, errors=(; y=:y_err)) do row, p
+            return row.x, row.y - row.y + p.c
+        end
         s = Autoscaler(exact, flat)
         @test_throws ArgumentError Autoscalers.model_data(s, [1.0])
     end
@@ -90,5 +92,23 @@
         @test_throws ArgumentError pvalue(b, :a => 1.0, :b => 0.25)
         @test_throws ArgumentError pvalue(b, :a => 1.0; method=:bca)
         @test_throws ArgumentError pvalue(b, :a => 1.0; n=10)
+    end
+
+    @testset "no usable replicates" begin
+        @test_throws ArgumentError bootstrap(s, estimate; n=0, progress=false)
+        @test_throws ArgumentError pvalue(b, :a => 1.0; method=:null, n=0, progress=false)
+        none = BootstrapResult(
+            s, b.param_names, estimate, b.samples, falses(n), b.method, b.options
+        )
+        @test_throws ArgumentError confint(none)
+        @test_throws ArgumentError stderror(none)
+        @test_throws ArgumentError pvalue(none, :a => 1.0)
+        # a constrained fit that cannot converge in one iteration
+        stuck = BootstrapResult(
+            s, b.param_names, estimate, b.samples, b.converged, b.method,
+            Optim.Options(; iterations=1),
+        )
+        kw = (; method=:null, n=2, progress=false)
+        @test_throws ArgumentError pvalue(stuck, :a => 1.3; kw...)
     end
 end
