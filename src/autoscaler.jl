@@ -43,8 +43,8 @@ evaluated from several threads at once.
 struct Autoscaler{P,A<:Ansatz{P},D<:NamedTuple,E<:NamedTuple}
     ansatz::A
 
-    # Columns used by the ansatz, sorted by size and `x`, and for each of them its errors
-    # or `nothing`.
+    # Columns used by the ansatz, sorted by size and `x`, and for each of them `nothing` or
+    # the index of its partial derivative (see `error_dual`) and its errors.
     data::D
     errors::E
 
@@ -132,8 +132,12 @@ function Autoscaler(
         c == L ? sizes : c == x ? x_raw : Float64[Tables.getcolumn(r, c) for r in rows]
     end)
     errors = NamedTuple{columns}(map(columns) do c
-        haskey(ansatz.errors, c) || return nothing
-        return Float64[Tables.getcolumn(r, ansatz.errors[c]) for r in rows]
+        if haskey(ansatz.errors, c)
+            slot = findfirst(==(c), keys(ansatz.errors))
+            return (slot, Float64[Tables.getcolumn(r, ansatz.errors[c]) for r in rows])
+        else
+            return nothing
+        end
     end)
 
     avail_sizes = Int[]
@@ -212,12 +216,38 @@ function free_parameter_names(a::Autoscaler)
     return Tuple(p for (p, h) in zip(a.ansatz.param_names, a.hardcodes) if isnan(h))
 end
 
+# Tags the dual numbers that carry the data errors, as `ForwardDiff.Tag{ErrorPropagation}`,
+# so they cannot be confused with duals of other differentiations.
+struct ErrorPropagation end
+const ErrorTag = ForwardDiff.Tag{ErrorPropagation}
+
+"""
+    error_dual(tag, value, (slot, errors), i, ::Val{K})
+
+`value` as a dual number whose `slot`-th of `K` partials is its error. Propagated through
+the ansatz, the partials of the scaled `y` are then `∂y/∂c * σ_c` for each column `c` with
+errors, and their norm is the first-order error of the scaled `y`.
+"""
+function error_dual(::T, value, (slot, errors), i, ::Val{K}) where {T,K}
+    return Dual{T}(value, ntuple(j -> j == slot ? errors[i] : 0.0, Val(K)))
+end
+
 function transform!(a::Autoscaler, params)
     p = parameter_tuple(a.ansatz, params)
     f = a.ansatz.f
+    n_errors = Val(length(a.ansatz.errors))
+    # ForwardDiff nests duals by the order in which their tags were first created, and the
+    # tag of the innermost differentiation must be the outermost dual. Creating the tag
+    # here, from the parameter type, puts it after the tags of any differentiation of the
+    # cost (whose duals are the parameters) and before any tag the ansatz creates.
+    tag = ForwardDiff.Tag(ErrorPropagation(), eltype(params))
     for i in eachindex(a.x_val_scaled)
         row = map(a.data, a.errors) do values, errors
-            return isnothing(errors) ? values[i] : values[i] ± errors[i]
+            if isnothing(errors)
+                return values[i]
+            else
+                return error_dual(tag, values[i], errors, i, n_errors)
+            end
         end
         x, y = f(row, p)
         a.x_val_scaled[i] = scaled_x(x)
@@ -236,11 +266,14 @@ function transform!(a::Autoscaler, params)
 end
 
 scaled_x(x::Real) = Float64(x)
-function scaled_x(::Measurement)
+function scaled_x(::Dual{<:ErrorTag})
     throw(ArgumentError("the scaled `x` must not depend on columns with errors"))
 end
 
-scaled_y(y::Measurement) = (Measurements.value(y), Measurements.uncertainty(y))
+function scaled_y(y::Dual{<:ErrorTag})
+    # `hypot` rescales, so tiny or huge errors do not underflow or overflow when squared.
+    return ForwardDiff.value(y), hypot(ForwardDiff.partials(y).values...)
+end
 function scaled_y(::Real)
     throw(ArgumentError(
         "the scaled `y` has no error; it must depend on a column listed in `errors`"

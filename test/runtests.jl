@@ -204,6 +204,33 @@ end
     transform!(s, [1.0])
     @test s.y_err_scaled ≈ sqrt(2) .* data.y_err
 
+    # nonlinear propagation: σ(y²) = 2|y|σ(y), σ(y z) = sqrt((zσ_y)² + (yσ_z)²)
+    sq = Ansatz((:a,); x=:x, errors=(; y=:y_err, z=:z_err)) do row, p
+        return row.x, row.y^2 + row.y * row.z
+    end
+    zs = (; data..., z=fill(2.0, length(data.y)), z_err=fill(0.5, length(data.y)))
+    s = Autoscaler(zs, sq)
+    transform!(s, [0.0])
+    y, σy, z, σz = s.data.y, last(s.errors.y), s.data.z, last(s.errors.z)
+    @test s.y_err_scaled ≈ sqrt.(((2 .* y .+ z) .* σy) .^ 2 .+ (y .* σz) .^ 2)
+
+    # the ansatz may differentiate with ForwardDiff itself; its duals nest outside the error
+    # duals, so the derivative of t * y at t = 1 still carries the error of y
+    inner = Ansatz((:a,); x=:x, errors=(; y=:y_err)) do row, p
+        return row.x, Autoscalers.ForwardDiff.derivative(t -> t * row.y, 1.0)
+    end
+    s = Autoscaler(data, inner)
+    transform!(s, [0.0])
+    @test s.y_err_scaled ≈ data.y_err
+
+    # tiny and huge errors survive propagation instead of under- or overflowing
+    ident = Ansatz((row, p) -> (row.x, row.y), (); x=:x, errors=(; y=:y_err))
+    for σ in (1e-200, 1e200)
+        s = Autoscaler((; data..., y_err=fill(σ, length(data.x))), ident)
+        transform!(s, Float64[])
+        @test all(==(σ), s.y_err_scaled)
+    end
+
     # the size column is passed as an integer
     int_size = Ansatz((); x=:x, errors=(; y=:y_err)) do row, p
         row.L isa Int || error("expected an integer size")
@@ -305,13 +332,13 @@ end
     nf.x[20] = -Inf
     s = @test_logs (:warn, r"3 rows with non-finite") Autoscaler(nf)
     @test all(isfinite, s.data.y)
-    @test all(isfinite, s.errors.y)
+    @test all(isfinite, last(s.errors.y))
     @test length(raw_x(s)) == 19
 
     neg = map(copy, data)
     neg.y_err[5] = -0.1
     s = @test_logs (:warn, r"1 rows with non-positive") Autoscaler(neg)
-    @test all(>(0), s.errors.y)
+    @test all(>(0), last(s.errors.y))
 
     # each kind is reported on every construction, not just the first one
     @test_logs (:warn, r"1 rows with non-positive") Autoscaler(neg)

@@ -1,7 +1,7 @@
 module Autoscalers
 
 using Tables
-using Measurements
+using ForwardDiff: ForwardDiff, Dual
 
 export Ansatz, Autoscaler, @ansatz, to_table, cost_breakdown
 
