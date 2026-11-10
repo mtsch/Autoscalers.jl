@@ -143,8 +143,6 @@ function rewrite(ex, ctx::AnsatzContext)
     end
 end
 
-const ANSATZ_EXAMPLE = "`@ansatz (a, b, x_c) -> :L^b * (:y ± :y_err) ~ :L^a * (:x - x_c)`"
-
 """
     @ansatz (params...) -> lhs ~ rhs [size=:L] [x=:col]
 
@@ -178,7 +176,8 @@ function of `rhs` (the scaled `x`).
 macro ansatz(lambda, options...)
     if !(lambda isa Expr && lambda.head == :->)
         throw(ArgumentError(
-            "`@ansatz` expects `(params...) -> lhs ~ rhs`, e.g. $ANSATZ_EXAMPLE; got " *
+            "`@ansatz` expects `(params...) -> lhs ~ rhs`, e.g. " *
+            "`@ansatz (a, b, x_c) -> :L^b * (:y ± :y_err) ~ :L^a * (:x - x_c)`; got " *
             "`$lambda`. The syntax without declared parameters is no longer supported."
         ))
     end
