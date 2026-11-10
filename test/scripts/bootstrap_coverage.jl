@@ -31,23 +31,22 @@ function main(n_datasets, n_replicates; n_null=max(1, n_datasets ÷ 4))
     rng = Xoshiro(20261110)
     names = keys(TRUTH)
     levels = (0.68, 0.95)
-    methods = (:percentile, :bc)
-    covered = Dict((m, name, level) => 0 for m in methods, name in names, level in levels)
-    rejected = Dict((m, name) => 0 for m in methods, name in names)
+    covered = Dict((name, level) => 0 for name in names, level in levels)
+    rejected = Dict(name => 0 for name in names)
     rejected_null = 0
     for k in 1:n_datasets
         s = Autoscaler(dataset(rng); eval_window=WINDOW)
         estimate = fit_collapse(s, [1.1, 0.2, 0.31]).params
         b = bootstrap(s, estimate; n=n_replicates, rng, progress=false)
-        for method in methods, level in levels
-            intervals = confint(b; level, method)
+        for level in levels
+            intervals = confint(b; level)
             for name in names
                 lo, hi = intervals[name]
-                covered[(method, name, level)] += lo ≤ TRUTH[name] ≤ hi
+                covered[(name, level)] += lo ≤ TRUTH[name] ≤ hi
             end
         end
-        for method in methods, name in names
-            rejected[(method, name)] += pvalue(b, name => TRUTH[name]; method) < 0.05
+        for name in names
+            rejected[name] += pvalue(b, name => TRUTH[name]) < 0.05
         end
         if k ≤ n_null
             p = pvalue(b, :a => TRUTH.a; method=:null, n=n_replicates, rng, progress=false)
@@ -56,22 +55,20 @@ function main(n_datasets, n_replicates; n_null=max(1, n_datasets ÷ 4))
         print("\rdataset $k/$n_datasets")
     end
     println()
-    for method in methods
-        for level in levels
-            se = binomial_se(level, n_datasets)
-            @printf("%-10s %.0f%% intervals (±%.3f):", method, 100level, se)
-            for name in names
-                @printf("  %s %.3f", name, covered[(method, name, level)] / n_datasets)
-            end
-            println()
-        end
-        se = binomial_se(0.05, n_datasets)
-        @printf("%-10s test, rejections at 5%% (±%.3f):", method, se)
+    for level in levels
+        se = binomial_se(level, n_datasets)
+        @printf("%.0f%% intervals (±%.3f):", 100level, se)
         for name in names
-            @printf("  %s %.3f", name, rejected[(method, name)] / n_datasets)
+            @printf("  %s %.3f", name, covered[(name, level)] / n_datasets)
         end
         println()
     end
+    se = binomial_se(0.05, n_datasets)
+    @printf("BC test, rejections at 5%% (±%.3f):", se)
+    for name in names
+        @printf("  %s %.3f", name, rejected[name] / n_datasets)
+    end
+    println()
     @printf(
         "null-resampling test of a, rejections at 5%% (±%.3f): %.3f over %d datasets\n",
         binomial_se(0.05, n_null), rejected_null / n_null, n_null,

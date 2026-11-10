@@ -248,20 +248,22 @@ function bias_correction(samples, estimate)
 end
 
 """
-    confint(b::BootstrapResult; level=0.95, method=:percentile)
+    confint(b::BootstrapResult; level=0.95)
 
-Bootstrap confidence intervals of every free parameter, as a `NamedTuple` of
-`(lower, upper)`. Both methods follow the shape of the bootstrap distribution, so the
-intervals can be asymmetric around the estimate.
+Bias-corrected percentile (BC) confidence intervals (Efron, 1987) of every free
+parameter, as a `NamedTuple` of `(lower, upper)`.
 
-* `method=:percentile`: the `α/2` and `1 - α/2` quantiles of the bootstrap samples,
-  with `α = 1 - level`.
-* `method=:bc`: bias-corrected percentile interval (Efron, 1987). It shifts the
-  quantiles to `Φ(2z₀ ± z_{α/2})`, where `z₀ = Φ⁻¹(P(θ* < θ̂))` measures how far the
-  bootstrap distribution is off-centre from the estimate. It needs no extra fits, and on
-  synthetic collapses it is better calibrated than `:percentile` (see
-  `test/scripts/bootstrap_coverage.jl`). A large `|z₀|` moves the levels towards 0 or 1,
-  so such quantiles need correspondingly many replicates (`n ≳ 1000`).
+The bounds are the quantiles of the bootstrap samples at levels `Φ(2z₀ ± z_{α/2})`, with
+`α = 1 - level`, where `z₀ = Φ⁻¹(P(θ* < θ̂))` measures how far the bootstrap
+distribution is off-centre from the estimate. For a centred distribution (`z₀ = 0`) this
+is the plain percentile interval. The intervals follow the
+shape of the bootstrap distribution, so they can be asymmetric around the estimate, and
+need no extra fits. On synthetic collapses they are close to their nominal coverage (see
+`test/scripts/bootstrap_coverage.jl`). A large `|z₀|` moves the levels towards 0 or 1,
+so such quantiles need correspondingly many replicates (`n ≳ 1000`).
+
+Other intervals can be computed from the samples in `b.samples` (rows of replicates whose
+fit converged are marked in `b.converged`).
 
 # References
 
@@ -269,31 +271,16 @@ intervals can be asymmetric around the estimate.
   (1987),
   [doi:10.1080/01621459.1987.10478410](https://doi.org/10.1080/01621459.1987.10478410).
 """
-function StatsAPI.confint(b::BootstrapResult; level=0.95, method=:percentile)
+function StatsAPI.confint(b::BootstrapResult; level=0.95)
     0 < level < 1 || throw(ArgumentError("`level` must be in (0, 1)"))
-    if method ∉ (:percentile, :bc)
-        throw(ArgumentError("unknown `method` $method, expected `:percentile` or `:bc`"))
-    end
+    z = normal_quantile((1 - level) / 2)
     intervals = map(eachcol(converged_samples(b)), b.estimate) do samples, estimate
-        lower, upper = interval_levels(samples, estimate, 1 - level, method)
-        return (quantile(samples, lower), quantile(samples, upper))
+        z0 = bias_correction(samples, estimate)
+        lower = quantile(samples, normal_cdf(2z0 + z))
+        upper = quantile(samples, normal_cdf(2z0 - z))
+        return (lower, upper)
     end
     return NamedTuple{b.param_names}(Tuple(intervals))
-end
-
-"""
-    interval_levels(samples, estimate, α, method)
-
-The quantile levels of the bootstrap samples that bound the interval of level `1 - α`.
-"""
-function interval_levels(samples, estimate, α, method)
-    if method == :percentile
-        return α / 2, 1 - α / 2
-    else
-        z0 = bias_correction(samples, estimate)
-        z = normal_quantile(α / 2)
-        return normal_cdf(2z0 + z), normal_cdf(2z0 - z)
-    end
 end
 
 """
@@ -307,19 +294,20 @@ function StatsAPI.stderror(b::BootstrapResult)
 end
 
 """
-    pvalue(b::BootstrapResult, name => value...; method=:percentile, kwargs...)
+    pvalue(b::BootstrapResult, name => value...; method=:bc, kwargs...)
 
 Two-sided p-value of the hypothesis that the parameters `name` equal `value`.
 
-* `method=:percentile` (default, no extra fits) tests one parameter against its
-  bootstrap distribution: `p = 2 min(P(θ* ≤ value), P(θ* ≥ value))`, with the `+1`
-  correction (Davison & Hinkley, 1997, see [`bootstrap`](@ref)) so that
-  `p ≥ 2/(n + 1)`. It is the test dual to the percentile interval of [`confint`](@ref):
-  `p < 1 - level` exactly when `value` lies outside the interval of that `level`.
-* `method=:bc` (no extra fits) is the test dual to the bias-corrected interval
-  `confint(b; method=:bc)` (Efron, 1987): the tail probabilities are mapped through
-  `Φ(Φ⁻¹(P) ∓ 2z₀)` before taking twice the smaller one. The two agree up to the
-  resolution of the replicates, which is coarse in the tails for large `|z₀|`.
+* `method=:bc` (default, no extra fits) tests one parameter and is the test dual to the
+  BC interval of [`confint`](@ref) (Efron, 1987): `p < 1 - level` exactly when `value`
+  lies outside the interval of that `level`, up to the resolution of the replicates. The
+  fractions of samples below and above `value`, with the `+1` correction (Davison &
+  Hinkley, 1997, see [`bootstrap`](@ref)), are mapped through `Φ(Φ⁻¹(P) ∓ 2z₀)`, and `p`
+  is twice the smaller one.
+  On the side towards which the BC interval is stretched, the smallest attainable
+  p-value is `2Φ(Φ⁻¹(1/(n + 1)) + 2|z₀|)`: about 0.005 for `n = 1000` and `|z₀| = 0.15`,
+  but 0.06 for `|z₀| = 0.6`. To reject strongly off-centre cases, use more replicates or
+  `method=:null`.
 * `method=:null` follows the first guideline of Hall & Wilson (1991) and resamples under
   the hypothesis. The parameters are refitted with `name` fixed at `value`; replicates
   are drawn from that constrained collapse, and each is fitted with and without the
@@ -338,7 +326,7 @@ Two-sided p-value of the hypothesis that the parameters `name` equal `value`.
   **47**, 757 (1991), [doi:10.2307/2532163](https://doi.org/10.2307/2532163).
 """
 function StatsAPI.pvalue(
-    b::BootstrapResult, hypotheses::Pair{Symbol,<:Real}...; method=:percentile, kwargs...
+    b::BootstrapResult, hypotheses::Pair{Symbol,<:Real}...; method=:bc, kwargs...
 )
     isempty(hypotheses) && throw(ArgumentError("no hypothesis given"))
     for (name, _) in hypotheses
@@ -348,36 +336,32 @@ function StatsAPI.pvalue(
             ))
         end
     end
-    if method in (:percentile, :bc)
-        isempty(kwargs) || throw(ArgumentError("`method=:$method` takes no options"))
+    if method == :bc
+        isempty(kwargs) || throw(ArgumentError("`method=:bc` takes no options"))
         if length(hypotheses) ≠ 1
             throw(ArgumentError(
-                "`method=:$method` tests one parameter; use `method=:null` for several"
+                "`method=:bc` tests one parameter; use `method=:null` for several"
             ))
         end
-        return interval_pvalue(b, only(hypotheses)...; bias_corrected=method == :bc)
+        return bc_pvalue(b, only(hypotheses)...)
     elseif method == :null
         return null_pvalue(b, hypotheses; kwargs...)
     else
-        throw(ArgumentError(
-            "unknown `method` $method, expected `:percentile`, `:bc` or `:null`"
-        ))
+        throw(ArgumentError("unknown `method` $method, expected `:bc` or `:null`"))
     end
 end
 
-function interval_pvalue(b::BootstrapResult, name, value; bias_corrected)
+function bc_pvalue(b::BootstrapResult, name, value)
     j = findfirst(==(name), b.param_names)
     samples = converged_samples(b)[:, j]
     n = length(samples)
     below = (1 + count(≤(value), samples)) / (n + 1)
     above = (1 + count(≥(value), samples)) / (n + 1)
-    if bias_corrected
-        # `value` is the lower BC bound at level 1 - p when
-        # Φ(2z₀ + z_{p/2}) = P(θ* ≤ value), and similarly for the upper bound.
-        z0 = bias_correction(samples, b.estimate[j])
-        below = normal_cdf(normal_quantile(below) - 2z0)
-        above = normal_cdf(normal_quantile(above) + 2z0)
-    end
+    # `value` is the lower BC bound at level 1 - p when Φ(2z₀ + z_{p/2}) = P(θ* ≤ value),
+    # and similarly for the upper bound.
+    z0 = bias_correction(samples, b.estimate[j])
+    below = normal_cdf(normal_quantile(below) - 2z0)
+    above = normal_cdf(normal_quantile(above) + 2z0)
     return min(1.0, 2 * min(below, above))
 end
 

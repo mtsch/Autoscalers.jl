@@ -3,6 +3,7 @@ using Autoscalers: lerp, interpolate, extrapolate, master_curve, get_parameters,
     free_parameter_names, window, transform!, select_subset, standard_master_curve, raw_x
 using Optim
 using Random
+using Statistics: quantile
 using Test
 
 ###
