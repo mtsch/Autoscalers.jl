@@ -66,6 +66,6 @@ extrapolated curves; shrink `eval_window`.
 """
 function cost_breakdown(a::Autoscaler, args::Union{AbstractVector,Tuple})
     isnothing(a.eval_window) && throw(ArgumentError("`eval_window` is not set"))
-    return fixed_window_breakdown(a, get_parameters(a, args))
+    return fixed_window_breakdown(a, get_parameters!(a, args))
 end
 cost_breakdown(a::Autoscaler, args::Vararg{Real}) = cost_breakdown(a, args)

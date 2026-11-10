@@ -26,7 +26,11 @@ parameters (in the order of `ansatz.param_names`, skipping hardcoded ones) retur
   is added (`d` = distance outside, in units of that size's scaled range).
 * `params...`: hardcode parameters by name, e.g. `a = 1/ν`.
 
-Rows with zero error are skipped with a warning.
+Rows with missing or non-finite values, or with `y_err ≤ 0`, are skipped with a warning.
+System sizes must be positive integers, and each size needs at least two usable rows.
+
+The `Autoscaler` reuses internal buffers between calls, so a single instance must not be
+evaluated from several threads at once.
 """
 struct Autoscaler{P,S<:ScalingAnsatz{P}}
     ansatz::S
@@ -86,8 +90,30 @@ function Autoscaler(
     end
     0 < window_width ≤ 1 || throw(ArgumentError("`window_width` must be in (0, 1]"))
 
-    rows = collect(Tables.rows(table))
-    sort!(rows, by=r -> (r[L], r[x]))
+    n_missing = n_nonfinite = n_bad_err = 0
+    rows = filter(collect(Tables.rows(table))) do row
+        values = (row[L], row[x], row[y], row[y_err])
+        if any(ismissing, values)
+            n_missing += 1
+        elseif !all(isfinite, values)
+            n_nonfinite += 1
+        elseif row[y_err] ≤ 0
+            n_bad_err += 1
+        else
+            l = row[L]
+            if !(isinteger(l) && l > 0)
+                throw(ArgumentError("system sizes `$L` must be positive integers, got $l"))
+            end
+            return true
+        end
+        return false
+    end
+    # Counted per call rather than using `maxlog`, which would silence the warning for
+    # every later `Autoscaler` in the session.
+    n_missing > 0 && @warn "Skipping $n_missing rows with missing values."
+    n_nonfinite > 0 && @warn "Skipping $n_nonfinite rows with non-finite values."
+    n_bad_err > 0 && @warn "Skipping $n_bad_err rows with non-positive `$y_err`."
+    sort!(rows; by=r -> (r[L], r[x]))
 
     x_val_raw = Float64[]
     y_val_raw = Float64[]
@@ -98,18 +124,11 @@ function Autoscaler(
 
     prev_size = -1
     start_index = 0
-    i = 0
-    for row in rows
-        if iszero(row[y_err])
-            @warn "Some data points have zero errors. Skipping." maxlog = 1
-            continue
-        end
-        i += 1
-
-        curr_size = row[L]
+    for (i, row) in enumerate(rows)
+        curr_size = Int(row[L])
         if curr_size ≠ prev_size
             if prev_size > 0
-                size_map[prev_size] = start_index:(i-1)
+                size_map[prev_size] = start_index:(i - 1)
             end
             push!(avail_sizes, curr_size)
             prev_size = curr_size
@@ -118,13 +137,18 @@ function Autoscaler(
         push!(x_val_raw, row[x])
         push!(y_val_raw, row[y])
         push!(y_err_raw, row[y_err])
-        push!(sizes, row[L])
+        push!(sizes, curr_size)
     end
     isempty(avail_sizes) && throw(ArgumentError("no usable data"))
     length(avail_sizes) ≥ 2 || throw(ArgumentError("need at least two system sizes"))
     size_map[prev_size] = start_index:length(x_val_raw)
+    for l in avail_sizes
+        if length(size_map[l]) < 2
+            throw(ArgumentError("system size L=$l has fewer than two usable data points"))
+        end
+    end
 
-    # The mask is built here, after sorting and dropping zero-error rows, so its indices
+    # The mask is built here, after sorting and dropping unusable rows, so its indices
     # always match the internal arrays.
     if isnothing(eval_window)
         ew = nothing
@@ -183,6 +207,15 @@ function transform!(a::Autoscaler, params)
         a.y_val_scaled[i] = Measurements.value(y_scaled)
         a.y_err_scaled[i] = Measurements.uncertainty(y_scaled)
     end
+    # Interpolation and the overlap window assume ascending scaled `x` within each size.
+    for size in a.avail_sizes
+        if !issorted(view(a.x_val_scaled, a.size_map[size]))
+            throw(ArgumentError(
+                "scaled `x` is not ascending for L=$size at parameters $params; the " *
+                "ansatz must map `x` to an increasing function of `x` for every size"
+            ))
+        end
+    end
     return nothing
 end
 
@@ -237,7 +270,15 @@ end
 
 Combine the free parameters `args` with the hardcoded ones into the full parameter vector.
 """
-function get_parameters(a::Autoscaler, args)
+get_parameters(a::Autoscaler, args) = copy(get_parameters!(a, args))
+
+"""
+    get_parameters!(a::Autoscaler, args)
+
+Like [`get_parameters`](@ref), but returns an internal buffer that is overwritten on the
+next call. Avoids an allocation per cost evaluation.
+"""
+function get_parameters!(a::Autoscaler, args)
     expected = count(isnan, a.hardcodes)
     if length(args) ≠ expected
         throw(ArgumentError("expected $(expected) params, got $(length(args))"))
@@ -256,8 +297,8 @@ function get_parameters(a::Autoscaler, args)
     return params
 end
 
-(a::Autoscaler)(params::AbstractVector) = cost_function(a, get_parameters(a, params))
-(a::Autoscaler)(args::Vararg{Real}) = cost_function(a, get_parameters(a, args))
+(a::Autoscaler)(params::AbstractVector) = cost_function(a, get_parameters!(a, params))
+(a::Autoscaler)(args::Vararg{Real}) = cost_function(a, get_parameters!(a, args))
 
 """
     to_table(a::Autoscaler, args...)
@@ -268,7 +309,7 @@ compared to), and `in_window` (whether the point is scored by the fixed-window c
 """
 to_table(a::Autoscaler, args::Vararg{Real}) = to_table(a, args)
 function to_table(a::Autoscaler, args::Union{AbstractVector,Tuple})
-    params = get_parameters(a, args)
+    params = get_parameters!(a, args)
     transform!(a, params)
     if !isnothing(a.eval_window)
         master = [fixed_master_curve(a, x, L).Y for (x, L) in zip(a.x_val_scaled, a.sizes)]
