@@ -214,6 +214,23 @@ end
     y, σy, z, σz = s.data.y, last(s.errors.y), s.data.z, last(s.errors.z)
     @test s.y_err_scaled ≈ sqrt.(((2 .* y .+ z) .* σy) .^ 2 .+ (y .* σz) .^ 2)
 
+    # the ansatz may differentiate with ForwardDiff itself; its duals nest outside the error
+    # duals, so the derivative of t * y at t = 1 still carries the error of y
+    inner = Ansatz((:a,); x=:x, errors=(; y=:y_err)) do row, p
+        return row.x, Autoscalers.ForwardDiff.derivative(t -> t * row.y, 1.0)
+    end
+    s = Autoscaler(data, inner)
+    transform!(s, [0.0])
+    @test s.y_err_scaled ≈ data.y_err
+
+    # tiny and huge errors survive propagation instead of under- or overflowing
+    ident = Ansatz((row, p) -> (row.x, row.y), (); x=:x, errors=(; y=:y_err))
+    for σ in (1e-200, 1e200)
+        s = Autoscaler((; data..., y_err=fill(σ, length(data.x))), ident)
+        transform!(s, Float64[])
+        @test all(==(σ), s.y_err_scaled)
+    end
+
     # the size column is passed as an integer
     int_size = Ansatz((); x=:x, errors=(; y=:y_err)) do row, p
         row.L isa Int || error("expected an integer size")

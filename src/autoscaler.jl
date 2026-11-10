@@ -216,31 +216,37 @@ function free_parameter_names(a::Autoscaler)
     return Tuple(p for (p, h) in zip(a.ansatz.param_names, a.hardcodes) if isnan(h))
 end
 
-# Tags the dual numbers that carry the data errors, so they cannot be confused with duals
-# created by the ansatz itself or by an optimizer differentiating the cost.
-struct ErrorTag end
+# Tags the dual numbers that carry the data errors, as `ForwardDiff.Tag{ErrorPropagation}`,
+# so they cannot be confused with duals of other differentiations.
+struct ErrorPropagation end
+const ErrorTag = ForwardDiff.Tag{ErrorPropagation}
 
 """
-    error_dual(value, (slot, errors), i, ::Val{K})
+    error_dual(tag, value, (slot, errors), i, ::Val{K})
 
 `value` as a dual number whose `slot`-th of `K` partials is its error. Propagated through
 the ansatz, the partials of the scaled `y` are then `∂y/∂c * σ_c` for each column `c` with
 errors, and their norm is the first-order error of the scaled `y`.
 """
-function error_dual(value, (slot, errors), i, ::Val{K}) where {K}
-    return Dual{ErrorTag}(value, ntuple(j -> j == slot ? errors[i] : 0.0, Val(K)))
+function error_dual(::T, value, (slot, errors), i, ::Val{K}) where {T,K}
+    return Dual{T}(value, ntuple(j -> j == slot ? errors[i] : 0.0, Val(K)))
 end
 
 function transform!(a::Autoscaler, params)
     p = parameter_tuple(a.ansatz, params)
     f = a.ansatz.f
     n_errors = Val(length(a.ansatz.errors))
+    # ForwardDiff nests duals by the order in which their tags were first created, and the
+    # tag of the innermost differentiation must be the outermost dual. Creating the tag
+    # here, from the parameter type, puts it after the tags of any differentiation of the
+    # cost (whose duals are the parameters) and before any tag the ansatz creates.
+    tag = ForwardDiff.Tag(ErrorPropagation(), eltype(params))
     for i in eachindex(a.x_val_scaled)
         row = map(a.data, a.errors) do values, errors
             if isnothing(errors)
                 return values[i]
             else
-                return error_dual(values[i], errors, i, n_errors)
+                return error_dual(tag, values[i], errors, i, n_errors)
             end
         end
         x, y = f(row, p)
@@ -260,12 +266,13 @@ function transform!(a::Autoscaler, params)
 end
 
 scaled_x(x::Real) = Float64(x)
-function scaled_x(::Dual{ErrorTag})
+function scaled_x(::Dual{<:ErrorTag})
     throw(ArgumentError("the scaled `x` must not depend on columns with errors"))
 end
 
-function scaled_y(y::Dual{ErrorTag})
-    return ForwardDiff.value(y), sqrt(sum(abs2, ForwardDiff.partials(y).values))
+function scaled_y(y::Dual{<:ErrorTag})
+    # `hypot` rescales, so tiny or huge errors do not underflow or overflow when squared.
+    return ForwardDiff.value(y), hypot(ForwardDiff.partials(y).values...)
 end
 function scaled_y(::Real)
     throw(ArgumentError(
