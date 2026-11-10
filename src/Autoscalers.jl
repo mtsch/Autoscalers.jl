@@ -3,7 +3,7 @@ module Autoscalers
 using Tables
 using Measurements
 
-export Autoscaler, @ansatz, to_table, cost_breakdown
+export Ansatz, Autoscaler, @ansatz, to_table, cost_breakdown
 
 include("ansatz.jl")
 include("autoscaler.jl")

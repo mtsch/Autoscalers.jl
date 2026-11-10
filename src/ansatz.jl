@@ -1,4 +1,87 @@
 """
+    Ansatz(f, params; x, errors, columns=(), size=:L)
+
+Scaling ansatz given as a function. `f(row, p)` returns the scaled `(x, y)` of one data
+point, where `row` is a `NamedTuple` with the columns `size`, `x`, the keys of `errors` and
+`columns`, and `p` is a `NamedTuple` of the parameters named in `params`.
+
+Columns listed in `errors` are passed as `Measurement`s carrying the error from their error
+column, so the uncertainty of the scaled `y` follows from error propagation. The scaled `y`
+must depend on at least one of them and the scaled `x` on none.
+
+* `params`: parameter names, in the order the [`Autoscaler`](@ref) expects their values.
+* `x`: column with the unscaled `x`. Rows are sorted by it, and `eval_window` refers to it.
+* `errors`: `NamedTuple` mapping columns to their error columns, e.g. `(; E=:dE)`.
+* `columns`: further columns used by `f`.
+* `size`: column with the system size. Its values are passed as integers.
+
+# Example
+
+```julia
+Ansatz((:a, :b, :t_c); x=:t, errors=(; E=:dE)) do row, p
+    return row.L^p.a * (row.t - p.t_c), row.L^p.b * row.E
+end
+```
+"""
+struct Ansatz{P,F,C<:Tuple{Vararg{Symbol}},E<:NamedTuple}
+    f::F
+    param_names::Tuple{Vararg{Symbol}}
+    columns::C
+    errors::E
+    x::Symbol
+    size::Symbol
+    formula::Any
+
+    # The parameter names are also a type parameter so that the `NamedTuple` of parameters
+    # passed to `f` is type-stable.
+    function Ansatz{P}(f::F, columns::C, errors::E, x, size, formula) where {P,F,C,E}
+        return new{P,F,C,E}(f, P, columns, errors, x, size, formula)
+    end
+end
+
+function Ansatz(f, params; x, errors, columns=(), size=:L, formula=nothing)
+    param_names = Tuple(Symbol(p) for p in params)
+    allunique(param_names) || throw(ArgumentError("parameter names must be unique"))
+    x = Symbol(x)
+    size = Symbol(size)
+    x == size && throw(ArgumentError("`x` and `size` must be different columns"))
+    if !(errors isa NamedTuple) || isempty(errors)
+        throw(ArgumentError(
+            "`errors` must be a non-empty `NamedTuple` mapping columns to their error " *
+            "columns, e.g. `(; y=:y_err)`"
+        ))
+    end
+    errors = map(Symbol, errors)
+    for c in (x, size)
+        haskey(errors, c) && throw(ArgumentError("column `$c` cannot have an error"))
+    end
+    cols = Tuple(unique!([size, x, Symbol.(collect(columns))..., keys(errors)...]))
+    for e in errors
+        e in cols && throw(ArgumentError("error column `$e` is also used as a value"))
+    end
+    return Ansatz{param_names}(f, cols, errors, x, size, formula)
+end
+
+function Base.show(io::IO, a::Ansatz)
+    if isnothing(a.formula)
+        print(io, "Ansatz(", a.f, ", ", a.param_names, "; x=", repr(a.x))
+        print(io, ", errors=", a.errors, ", columns=", a.columns)
+        print(io, ", size=", repr(a.size), ")")
+    else
+        print(io, "@ansatz(", a.formula, ")")
+    end
+end
+
+"""
+    parameter_tuple(a::Ansatz, params)
+
+The values `params` as a `NamedTuple` keyed by the parameter names of `a`.
+"""
+function parameter_tuple(::Ansatz{P}, params) where {P}
+    return NamedTuple{P}(ntuple(i -> params[i], Val(length(P))))
+end
+
+"""
     get_variables(expr, ignore)
 
 Get all variable names that appear in `expr`, except those in `ignore`.
@@ -59,8 +142,7 @@ the left-hand side, e.g. to subtract an analytic background:
 ```
 
 The column names used for `x`, `y`, `y_err`, and `L` can be remapped to match your data by
-attaching `name => new_name` pairs to the end of the macro call. These become the defaults
-of the corresponding keyword arguments of [`Autoscaler`](@ref):
+attaching `name => new_name` pairs to the end of the macro call:
 
 ```julia
 a = @ansatz L^b * y ~ L^a * (x - x_c) L => system_size
@@ -73,10 +155,6 @@ macro ansatz(expr, exprs...)
         throw(ArgumentError("expected an expression of the form `left ~ right`, got `$expr`"))
     end
     params = sort!(unique(get_variables(expr, [:x, :y, :L])))
-    param_mapping = Dict{Symbol,Expr}()
-    for (i, p) in enumerate(params)
-        param_mapping[p] = :(params[$i])
-    end
 
     expr_left = expr.args[2]
     expr_right = expr.args[3]
@@ -88,21 +166,7 @@ macro ansatz(expr, exprs...)
     :x ∉ right_vars && throw(ArgumentError("x should appear in the right-hand side"))
     :y ∈ right_vars && throw(ArgumentError("y should not appear in the right-hand side"))
 
-    expr_left = replace_params!(expr_left, param_mapping)
-    expr_right = replace_params!(expr_right, param_mapping)
-
-    scale_y = quote
-        function (x, y, L, params)
-            return $expr_left
-        end
-    end
-    scale_x = quote
-        function (x, L, params)
-            return $expr_right
-        end
-    end
-
-    remaps = Dict{Symbol,Symbol}()
+    remaps = Dict(:L => :L, :x => :x, :y => :y, :y_err => :y_err)
     for e in exprs
         if !(e isa Expr && e.head == :call && e.args[1] ≡ :(=>))
             throw(ArgumentError("extra arguments must be of the form `name => new_name`"))
@@ -115,29 +179,24 @@ macro ansatz(expr, exprs...)
         end
     end
 
+    mapping = Dict{Symbol,Any}(p => :(p.$p) for p in params)
+    for v in (:L, :x, :y)
+        mapping[v] = :(row.$(remaps[v]))
+    end
+    expr_left = replace_params!(expr_left, mapping)
+    expr_right = replace_params!(expr_right, mapping)
+
+    errors = :(NamedTuple{($(QuoteNode(remaps[:y])),)}(($(QuoteNode(remaps[:y_err])),)))
     return quote
-        ScalingAnsatz(
-            $(Expr(:quote, orig_expr)),
-            $scale_x, $scale_y,
-            $(Tuple(params)),
-            $remaps,
+        Ansatz(
+            (row, p) -> ($expr_right, $expr_left),
+            $(Tuple(params));
+            x=$(QuoteNode(remaps[:x])),
+            errors=$errors,
+            size=$(QuoteNode(remaps[:L])),
+            formula=$(Expr(:quote, orig_expr)),
         )
     end
-end
-
-struct ScalingAnsatz{N,F,G}
-    formula::Expr
-    scale_x::F
-    scale_y::G
-    param_names::NTuple{N,Symbol}
-    remaps::Dict{Symbol,Symbol}
-end
-function Base.show(io::IO, a::ScalingAnsatz)
-    print(io, "@ansatz($(a.formula)")
-    for (k, v) in a.remaps
-        print(io, ", $k => $v")
-    end
-    print(io, ")")
 end
 
 const DEFAULT_ANSATZ = @ansatz(L^b * y ~ L^a * (x - x_c))

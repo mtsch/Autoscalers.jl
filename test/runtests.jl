@@ -1,6 +1,6 @@
 using Autoscalers
 using Autoscalers: lerp, interpolate, extrapolate, master_curve, get_parameters,
-    free_parameter_names, window, transform!, select_subset, standard_master_curve
+    free_parameter_names, window, transform!, select_subset, standard_master_curve, raw_x
 using Optim
 using Random
 using Test
@@ -94,14 +94,15 @@ end
 @testset "@ansatz" begin
     a = @ansatz L^b * y ~ L^a * (x - x_c)
     @test a.param_names == (:a, :b, :x_c)
-    @test a.scale_x(2.0, 4, [0.5, 1.0, 1.0]) ≈ 2.0
-    @test a.scale_y(0.0, 3.0, 4, [0.5, 1.0, 1.0]) ≈ 12.0
+    @test a.f((; L=4, x=2.0, y=3.0), (; a=0.5, b=1.0, x_c=1.0)) == (2.0, 12.0)
+    @test (a.x, a.size, a.errors) == (:x, :L, (; y=:y_err))
     @test sprint(show, a) == "@ansatz(L ^ b * y ~ L ^ a * (x - x_c))"
 
     # x on the left-hand side (analytic background)
     bg = @ansatz L^b * (y - A - B * (x - x_c)) ~ L^a * (x - x_c)
     @test bg.param_names == (:A, :B, :a, :b, :x_c)
-    @test bg.scale_y(2.0, 10.0, 1, [1.0, 2.0, 0.0, 0.0, 1.0]) ≈ 10 - 1 - 2
+    p = (; A=1.0, B=2.0, a=0.0, b=0.0, x_c=1.0)
+    @test bg.f((; L=1, x=2.0, y=10.0), p)[2] ≈ 10 - 1 - 2
 
     # numeric literals are not parameters
     fixed = @ansatz L^0.5 * y ~ L^1.5 * (x - x_c)
@@ -109,7 +110,7 @@ end
 
     # remaps
     r = @ansatz L^b * y ~ L^a * (x - x_c) L => size x => t
-    @test r.remaps == Dict(:L => :size, :x => :t)
+    @test (r.size, r.x, r.columns, r.errors) == (:size, :t, (:size, :t, :y), (; y=:y_err))
 
     # malformed input
     @test_throws ArgumentError @macroexpand @ansatz L^b * y + L^a * x
@@ -118,6 +119,59 @@ end
     @test_throws ArgumentError @macroexpand @ansatz L^b * y ~ L^a * (x - y)
     @test_throws ArgumentError @macroexpand @ansatz L^b * y ~ L^a * x z => w
     @test_throws ArgumentError @macroexpand @ansatz L^b * y ~ L^a * x L
+end
+
+@testset "Ansatz (function form)" begin
+    a = Ansatz((:a, :b, :t_c); x=:t, errors=(; E=:dE), columns=(:h,), size=:N) do row, p
+        return row.N^p.a * (row.t - p.t_c), row.N^p.b * row.E + row.h
+    end
+    @test a.param_names == (:a, :b, :t_c)
+    @test (a.x, a.size, a.errors) == (:t, :N, (; E=:dE))
+    @test a.columns == (:N, :t, :h, :E)
+    @test startswith(sprint(show, a), "Ansatz(")
+
+    # the same scaling as the default ansatz gives the same cost
+    g(L, x) = L^-0.25 * (1 + tanh(L * (x - 0.3)))
+    data = synthetic(g; sizes=[8, 16, 32], xs=range(0.2, 0.4; length=41), σ=1e-3)
+    renamed = (; N=data.L, t=data.x, E=data.y, dE=data.y_err, h=zero(data.x))
+    p = [1.1, 0.2, 0.31]
+    for kw in ((;), (; classic_cost_function=true), (; eval_window=(0.28, 0.32)))
+        @test Autoscaler(renamed, a; kw...)(p) == Autoscaler(data; kw...)(p)
+    end
+
+    # only the columns used by the ansatz are read: a missing value elsewhere is ignored
+    extra = (; renamed..., unused=fill(missing, length(data.x)))
+    @test @test_logs(Autoscaler(extra, a)(p)) == Autoscaler(renamed, a)(p)
+
+    # several columns with errors: the uncertainties combine
+    two = Ansatz((:a,); x=:x, errors=(; y=:y_err, z=:z_err)) do row, p
+        return row.L^p.a * row.x, row.y - row.z
+    end
+    s = Autoscaler((; data..., z=zero(data.y), z_err=data.y_err), two)
+    transform!(s, [1.0])
+    @test s.y_err_scaled ≈ sqrt(2) .* data.y_err
+
+    # the size column is passed as an integer
+    int_size = Ansatz((); x=:x, errors=(; y=:y_err)) do row, p
+        row.L isa Int || error("expected an integer size")
+        return row.x, row.y
+    end
+    @test Autoscaler(data, int_size)() isa Float64
+
+    # invalid definitions
+    f(row, p) = (row.x, row.y)
+    @test_throws ArgumentError Ansatz(f, (:a, :a); x=:x, errors=(; y=:y_err))
+    @test_throws ArgumentError Ansatz(f, (:a,); x=:x, errors=(;))
+    @test_throws ArgumentError Ansatz(f, (:a,); x=:x, errors=(:y, :y_err))
+    @test_throws ArgumentError Ansatz(f, (:a,); x=:L, errors=(; y=:y_err))
+    @test_throws ArgumentError Ansatz(f, (:a,); x=:x, errors=(; x=:x_err))
+    @test_throws ArgumentError Ansatz(f, (:a,); x=:x, errors=(; y=:x))
+
+    # the scaled x must not carry an error, the scaled y must
+    s = Autoscaler(data, Ansatz((row, p) -> (row.y, row.y), (); x=:x, errors=(; y=:y_err)))
+    @test_throws ArgumentError s()
+    s = Autoscaler(data, Ansatz((row, p) -> (row.x, row.x), (); x=:x, errors=(; y=:y_err)))
+    @test_throws ArgumentError s()
 end
 
 @testset "Autoscaler construction" begin
@@ -133,7 +187,7 @@ end
     perm = randperm(Xoshiro(1), length(data.x))
     shuffled = map(v -> v[perm], data)
     s2 = Autoscaler(shuffled)
-    @test s2.x_val_raw == s.x_val_raw
+    @test raw_x(s2) == raw_x(s)
     @test s2.sizes == s.sizes
 
     # zero-error rows are dropped with a warning, and the eval mask stays aligned
@@ -142,9 +196,9 @@ end
     s3 = @test_logs (:warn, r"3 rows with non-positive") match_mode = :any Autoscaler(
         bad; eval_window=(0.25, 0.75)
     )
-    @test length(s3.x_val_raw) == 19
+    @test length(raw_x(s3)) == 19
     @test length(s3.eval_mask) == 19
-    @test all(0.25 .≤ s3.x_val_raw[s3.eval_mask] .≤ 0.75)
+    @test all(0.25 .≤ raw_x(s3)[s3.eval_mask] .≤ 0.75)
     @test count(s3.eval_mask) == 9
 
     # hardcoded parameters
@@ -161,10 +215,8 @@ end
     renamed = (; size=data.L, t=data.x, val=data.y, val_err=data.y_err)
     ans = @ansatz L^b * y ~ L^a * (x - x_c) L => size x => t y => val y_err => val_err
     s5 = Autoscaler(renamed, ans)
-    @test s5.x_val_raw == s.x_val_raw
-    # explicit keywords override the remaps
-    s6 = Autoscaler(renamed; L=:size, x=:t, y=:val, y_err=:val_err)
-    @test s6.y_val_raw == s.y_val_raw
+    @test raw_x(s5) == raw_x(s)
+    @test s5.data.val == s.data.y
 
     # invalid input
     @test_throws ArgumentError Autoscaler(data; c=1.0)
@@ -190,21 +242,21 @@ end
     m.y[3] = missing
     m.x[14] = missing
     s = @test_logs (:warn, r"2 rows with missing") Autoscaler(m)
-    @test length(s.x_val_raw) == 20
+    @test length(raw_x(s)) == 20
 
     nf = map(copy, data)
     nf.y[1] = NaN
     nf.y_err[2] = Inf
     nf.x[20] = -Inf
     s = @test_logs (:warn, r"3 rows with non-finite") Autoscaler(nf)
-    @test all(isfinite, s.y_val_raw)
-    @test all(isfinite, s.y_err_raw)
-    @test length(s.x_val_raw) == 19
+    @test all(isfinite, s.data.y)
+    @test all(isfinite, s.errors.y)
+    @test length(raw_x(s)) == 19
 
     neg = map(copy, data)
     neg.y_err[5] = -0.1
     s = @test_logs (:warn, r"1 rows with non-positive") Autoscaler(neg)
-    @test all(>(0), s.y_err_raw)
+    @test all(>(0), s.errors.y)
 
     # each kind is reported on every construction, not just the first one
     @test_logs (:warn, r"1 rows with non-positive") Autoscaler(neg)
@@ -291,7 +343,7 @@ end
         t = to_table(s, 1.0, 0.0, 0.5)
         @test keys(t) == (:L, :x, :y, :y_err, :master_curve, :in_window)
         @test length(t.x) == length(data.x)
-        @test t.x ≈ s.sizes .* (s.x_val_raw .- 0.5)
+        @test t.x ≈ s.sizes .* (raw_x(s) .- 0.5)
         @test to_table(s, [1.0, 0.0, 0.5]).y == t.y
         inner = abs.(t.x) .< 1
         @test all(isfinite, t.master_curve[inner])
