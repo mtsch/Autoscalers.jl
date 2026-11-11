@@ -1,7 +1,7 @@
-# Coverage of bootstrap percentile intervals and size of the bootstrap tests on synthetic
-# data with known parameters. Too slow for CI; run with e.g.
+# Coverage of bias-corrected (BC) bootstrap intervals and size of the bootstrap tests on
+# synthetic data with known parameters. Too slow for CI; run with e.g.
 #
-#     julia --project --threads=auto test/scripts/bootstrap_coverage.jl [datasets] [replicates]
+#     julia --project -t auto test/scripts/bootstrap_coverage.jl [datasets] [replicates]
 #
 # A well-calibrated interval of level 1 - α contains the true value in a fraction 1 - α of
 # the datasets, and a test of the true value rejects at level α in a fraction α of them.
@@ -32,7 +32,7 @@ function main(n_datasets, n_replicates; n_null=max(1, n_datasets ÷ 4))
     names = keys(TRUTH)
     levels = (0.68, 0.95)
     covered = Dict((name, level) => 0 for name in names, level in levels)
-    rejected_percentile = Dict(name => 0 for name in names)
+    rejected = Dict(name => 0 for name in names)
     rejected_null = 0
     for k in 1:n_datasets
         s = Autoscaler(dataset(rng); eval_window=WINDOW)
@@ -46,7 +46,7 @@ function main(n_datasets, n_replicates; n_null=max(1, n_datasets ÷ 4))
             end
         end
         for name in names
-            rejected_percentile[name] += pvalue(b, name => TRUTH[name]) < 0.05
+            rejected[name] += pvalue(b, name => TRUTH[name]) < 0.05
         end
         if k ≤ n_null
             p = pvalue(b, :a => TRUTH.a; method=:null, n=n_replicates, rng, progress=false)
@@ -64,9 +64,9 @@ function main(n_datasets, n_replicates; n_null=max(1, n_datasets ÷ 4))
         println()
     end
     se = binomial_se(0.05, n_datasets)
-    @printf("percentile test, rejections at 5%% (±%.3f):", se)
+    @printf("BC test, rejections at 5%% (±%.3f):", se)
     for name in names
-        @printf("  %s %.3f", name, rejected_percentile[name] / n_datasets)
+        @printf("  %s %.3f", name, rejected[name] / n_datasets)
     end
     println()
     @printf(

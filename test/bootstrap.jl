@@ -1,7 +1,8 @@
 @testset "fit_collapse and bootstrap" begin
     g(L, x) = L^-0.25 * (1 + tanh(L * (x - 0.3)) + 0.3 * L * (x - 0.3))
     exact = synthetic(g; sizes=[8, 16, 32], xs=range(0.2, 0.4; length=41), σ=2e-3)
-    window = (; eval_window=(0.27, 0.33))
+    # inside the range all sizes cover, 0.1 / (32 / 8) = 0.025 around x_c
+    window = (; eval_window=(0.28, 0.32))
 
     @testset "fit_collapse" begin
         s = Autoscaler(exact; window...)
@@ -96,13 +97,56 @@
         @test_throws ArgumentError confint(b; level=1.0)
     end
 
+    @testset "bias correction" begin
+        quantiles(x, level) = (quantile(x, (1 - level) / 2), quantile(x, (1 + level) / 2))
+        # with samples symmetric around the estimate, z₀ = 0: plain percentile interval
+        mirrored = vcat(b.samples, 2 .* estimate' .- b.samples)
+        sym = BootstrapResult(
+            s, b.param_names, estimate, mirrored, trues(2n), b.method, b.options
+        )
+        for (j, name) in enumerate(b.param_names)
+            @test all(confint(sym)[name] .≈ quantiles(mirrored[:, j], 0.95))
+        end
+        # samples off-centre above the estimate: the interval moves down
+        shifted = b.samples .+ 0.5 .* collect(stderror(b))'
+        up = BootstrapResult(
+            s, b.param_names, estimate, shifted, trues(n), b.method, b.options
+        )
+        @test all(confint(up).a .< quantiles(shifted[:, 1], 0.95))
+        # The test is dual to the interval. Checked on many off-centre samples, because
+        # with few the shifted quantile levels are not resolved.
+        many = estimate' .+ 0.003 .+ 0.01 .* randn(Xoshiro(4), 4000, 3)
+        off = BootstrapResult(
+            s, b.param_names, estimate, many, trues(4000), b.method, b.options
+        )
+        lo, hi = confint(off; level=0.9).a
+        @test pvalue(off, :a => (lo + hi) / 2) > 0.1
+        @test pvalue(off, :a => lo) ≈ 0.1 atol = 0.01
+        @test pvalue(off, :a => hi) ≈ 0.1 atol = 0.01
+        @test pvalue(off, :a => estimate[1] + 1) < 1e-3
+
+        # ties count as half; samples all on one side are clamped to 1/(2n) from 0 or 1
+        @test Autoscalers.bias_correction([1, 2, 2, 3], 2) == 0
+        q = Autoscalers.normal_quantile
+        @test Autoscalers.bias_correction([1, 2, 3, 4], 10) ≈ q(1 - 1 / 8)
+        @test Autoscalers.bias_correction([1, 2, 3, 4], 0) ≈ q(1 / 8)
+        # a single replicate gives a finite, zero-width interval at that replicate
+        one = BootstrapResult(
+            s, b.param_names, estimate, b.samples[1:1, :], trues(1), b.method, b.options
+        )
+        for (j, name) in enumerate(b.param_names)
+            @test confint(one)[name] == (b.samples[1, j], b.samples[1, j])
+        end
+    end
+
     @testset "pvalue" begin
-        # percentile: consistent with the interval, and bounded below by 2/(n + 1)
         @test pvalue(b, :a => estimate[1]) > 0.3
-        @test pvalue(b, :a => 2.0) ≈ 2 / (n + 1)
-        lo, hi = confint(b; level=0.9).a
-        @test pvalue(b, :a => lo - 1e-9) < 0.1 + 2 / (n + 1)
-        @test pvalue(b, :a => (lo + hi) / 2) > 0.1
+        # beyond all samples, the p-value is the smallest one attainable on that side
+        z0 = Autoscalers.bias_correction(b.samples[:, 1], estimate[1])
+        Φ, Φ⁻¹ = Autoscalers.normal_cdf, Autoscalers.normal_quantile
+        smallest(z) = 2Φ(Φ⁻¹(1 / (n + 1)) + z)
+        @test pvalue(b, :a => 2.0) ≈ smallest(2z0)
+        @test pvalue(b, :a => 0.0) ≈ smallest(-2z0)
 
         # resampling under the hypothesis
         kw = (; method=:null, n=20, rng=Xoshiro(3), progress=false)
@@ -113,7 +157,7 @@
         @test_throws ArgumentError pvalue(b)
         @test_throws ArgumentError pvalue(b, :c => 1.0)
         @test_throws ArgumentError pvalue(b, :a => 1.0, :b => 0.25)
-        @test_throws ArgumentError pvalue(b, :a => 1.0; method=:bca)
+        @test_throws ArgumentError pvalue(b, :a => 1.0; method=:percentile)
         @test_throws ArgumentError pvalue(b, :a => 1.0; n=10)
     end
 
