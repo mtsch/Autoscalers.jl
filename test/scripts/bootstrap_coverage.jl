@@ -1,5 +1,5 @@
-# Coverage of bootstrap percentile intervals and size of the bootstrap tests on synthetic
-# data with known parameters. Too slow for CI; run with e.g.
+# Coverage of bias-corrected (BC) bootstrap intervals and size of the bootstrap tests on
+# synthetic data with known parameters. Too slow for CI; run with e.g.
 #
 #     julia --project -t auto test/scripts/bootstrap_coverage.jl [datasets] [replicates]
 #
