@@ -17,13 +17,12 @@ end
 """
     points_at!(dst, a::Autoscaler, x)
 
-Fill `dst` with `(y, dy^2)` of each size interpolated at scaled `x`.
+Fill `dst` with `(y, dy^2)` of each curve interpolated at scaled `x`.
 """
 function points_at!(dst, a::Autoscaler, x)
-    length(dst) == length(a.avail_sizes) ||
-        throw(DimensionMismatch("bad length of `dst`"))
-    for (i, L) in enumerate(a.avail_sizes)
-        xs, ys, y_errs = scaled_data(a, L)
+    length(dst) == n_curves(a) || throw(DimensionMismatch("bad length of `dst`"))
+    for i in 1:n_curves(a)
+        xs, ys, y_errs = scaled_data(a, i)
         dst[i] = interpolate(xs, ys, y_errs, x; sq_errs=true)
     end
     return dst
@@ -42,20 +41,20 @@ function delta_squared(points, index; skip=false)
 end
 
 """
-    new_master_curve(a::Autoscaler, x, own_size)
+    new_master_curve(a::Autoscaler, x, own_curve)
 
-Master curve `(Y, dY2)` at scaled `x`, leaving out `own_size` unless `a.use_all_sizes`.
-Returns `(NaN, NaN)` if any size does not cover `x`.
+Master curve `(Y, dY2)` at scaled `x`, leaving out `own_curve` unless `a.use_all_sizes`.
+Returns `(NaN, NaN)` if any curve does not cover `x`.
 """
-function new_master_curve(a::Autoscaler, x, own_size)
-    points = map(a.avail_sizes) do size
-        xs, ys, y_errs = scaled_data(a, size)
+function new_master_curve(a::Autoscaler, x, own_curve)
+    points = map(1:n_curves(a)) do c
+        xs, ys, y_errs = scaled_data(a, c)
         interpolate(xs, ys, y_errs, x; sq_errs=true)
     end
     if any(ismissing, points)
         return (NaN, NaN)
     else
-        skip = a.use_all_sizes ? 0 : findfirst(==(own_size), a.avail_sizes)
+        skip = a.use_all_sizes ? 0 : own_curve
         return master_curve(points, skip)
     end
 end
@@ -71,8 +70,8 @@ function new_cost_function(a::Autoscaler, params)
     knots = all_knots(a, lo, hi)
     result = 0.0
 
-    prev_pts = Vector{Tuple{Float64,Float64}}(undef, length(a.avail_sizes))
-    curr_pts = Vector{Tuple{Float64,Float64}}(undef, length(a.avail_sizes))
+    prev_pts = Vector{Tuple{Float64,Float64}}(undef, n_curves(a))
+    curr_pts = Vector{Tuple{Float64,Float64}}(undef, n_curves(a))
 
     for (prev_x, curr_x) in zip(knots, Iterators.drop(knots, 1))
         points_at!(prev_pts, a, prev_x)
@@ -83,5 +82,5 @@ function new_cost_function(a::Autoscaler, params)
             result += (curr_x - prev_x) * (curr_δ2 + prev_δ2) / 2
         end
     end
-    return result / length(a.avail_sizes) / (knots[end] - knots[1])
+    return result / n_curves(a) / (knots[end] - knots[1])
 end

@@ -2,14 +2,14 @@
     pooled_master_curve(a::Autoscaler)
 
 The master curve at the scaled `x` of every data point: the error-weighted mean of all
-sizes that cover it, including the point's own size, so it is defined at every point.
+curves that cover it, including the point's own curve, so it is defined at every point.
 Uses the current scaling of `a`.
 """
 function pooled_master_curve(a::Autoscaler)
     return map(a.x_val_scaled) do x
         numerator = denominator = 0.0
-        for size in a.avail_sizes
-            xs, ys, dys = scaled_data(a, size)
+        for c in 1:n_curves(a)
+            xs, ys, dys = scaled_data(a, c)
             point = interpolate(xs, ys, dys, x; sq_errs=true)
             if !ismissing(point)
                 numerator += point[1] / point[2]
@@ -181,7 +181,7 @@ Parametric bootstrap of the free parameters around their fitted values `estimate
 (Efron & Tibshirani, 1993; Davison & Hinkley, 1997).
 
 The fitted collapse is taken as the true model: at `estimate`, the master curve of all
-sizes (the error-weighted mean of the sizes covering each point) is mapped back to the
+curves (the error-weighted mean of the curves covering each point) is mapped back to the
 data by inverting the ansatz for the first column with errors. Each of the `n`
 replicates adds Gaussian noise of the measured errors to that model (and to the other
 columns with errors), and refits the parameters with [`fit_collapse`](@ref), using

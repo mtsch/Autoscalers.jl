@@ -29,7 +29,7 @@ function classic_cost_xr(s, params, lo, hi)
     n = 0
     for i in eachindex(s.x_val_scaled)
         lo ≤ s.x_val_scaled[i] ≤ hi || continue
-        m = standard_master_curve(s, s.x_val_scaled[i], s.sizes[i])
+        m = standard_master_curve(s, s.x_val_scaled[i], s.curve[i])
         ismissing(m) && continue
         total += (s.y_val_scaled[i] - m[1])^2 / (s.y_err_scaled[i]^2 + m[2])
         n += 1

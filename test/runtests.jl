@@ -155,6 +155,17 @@ end
     @test pc.f((; L=1, x=3.0, y=0.0), (; a=2.0))[1] == 9.0
     @test_throws ArgumentError @macroexpand @ansatz a -> (:y ± :e) ~ a.(:x)
 
+    # group columns identify curves together with the size and are not candidates for x
+    gr = @ansatz (a, x_c) -> (:y ± :y_err) - :u ~ :L^a * (:x - x_c) + :u group=:u
+    @test (gr.x, gr.group, gr.columns) == (:x, (:u,), (:L, :u, :x, :y))
+    @test endswith(sprint(show, gr), "group = :u)")
+    gr2 = @ansatz a -> (:y ± :y_err) ~ :L^a * :x group=(:u, :v)
+    @test gr2.group == (:u, :v)
+    @test_throws ArgumentError @ansatz a -> (:y ± :e) ~ :x group=:x x=:x
+    @test_throws ArgumentError @ansatz a -> (:y ± :e) ~ :x group=:L
+    @test_throws ArgumentError @ansatz a -> (:y ± :e) ~ :x group=:y
+    @test_throws ArgumentError @ansatz a -> (:y ± :e) ~ :x group=(:u, :u)
+
     # several columns with errors
     two = @ansatz a -> (:y ± :y_err) - (:z ± :z_err) ~ :L^a * :x
     @test two.errors == (; y=:y_err, z=:z_err)
@@ -183,6 +194,19 @@ end
     @test (a.x, a.size, a.errors) == (:t, :N, (; E=:dE))
     @test a.columns == (:N, :t, :h, :E)
     @test startswith(sprint(show, a), "Ansatz(")
+    ag = Ansatz((:a,); x=:t, errors=(; E=:dE), size=:N, group=:u) do row, p
+        return row.N^p.a * row.t, row.E
+    end
+    @test (ag.group, ag.columns) == ((:u,), (:N, :u, :t, :E))
+    @test endswith(sprint(show, ag), "group=(:u,))")
+    @test_throws ArgumentError Ansatz(identity, (:a,); x=:t, errors=(; E=:dE), group=:t)
+    @test_throws ArgumentError Ansatz(identity, (:a,); x=:t, errors=(; E=:dE), group=:E)
+    # names returned by `to_table`
+    for g in (:x, :L, :master_curve)
+        @test_throws r"clashes" Ansatz(
+            identity, (:a,); x=:t, size=:N, errors=(; E=:dE), group=g
+        )
+    end
 
     # the same scaling as the default ansatz gives the same cost
     g(L, x) = L^-0.25 * (1 + tanh(L * (x - 0.3)))
@@ -259,8 +283,8 @@ end
     data = synthetic((L, x) -> x; sizes=[4, 6], xs=0:0.1:1)
 
     s = Autoscaler(data)
-    @test s.avail_sizes == [4, 6]
-    @test s.size_map == Dict(4 => 1:11, 6 => 12:22)
+    @test s.curve_ranges == [1:11, 12:22]
+    @test s.curve_labels == ["L=4", "L=6"]
     @test free_parameter_names(s) == (:a, :b, :x_c)
     @test startswith(sprint(show, s), "Autoscaler(@ansatz((a, b, x_c)->")
 
@@ -345,7 +369,7 @@ end
     @test_logs (:warn, r"1 rows with non-positive") Autoscaler(neg)
 
     # system sizes
-    @test Autoscaler((; data..., L=float.(data.L))).avail_sizes == [4, 6]
+    @test Autoscaler((; data..., L=float.(data.L))).curve_ranges == [1:11, 12:22]
     @test_throws ArgumentError Autoscaler((; data..., L=data.L .+ 0.5))
     @test_throws ArgumentError Autoscaler((; data..., L=data.L .- 4))
 
@@ -379,6 +403,7 @@ end
     )
     s = Autoscaler(data; classic_cost_function=true)
     transform!(s, [0.0, 0.0, 0.0])
+    curve(L) = findfirst(==(L), (4, 6, 8))
 
     # (L, x) => (number of selected points, Y, dY²); nothing brackets L=4, x=0 or L=8, x=3
     expected = [
@@ -389,20 +414,20 @@ end
         (8, 1.0) => (4, 0.98139534883721, 0.006511627906976748),
     ]
     for ((L, x), (n, Y, dY2)) in expected
-        @test length(select_subset(s, x, L)[1]) == n
-        m = standard_master_curve(s, x, L)
+        @test length(select_subset(s, x, curve(L))[1]) == n
+        m = standard_master_curve(s, x, curve(L))
         @test m[1] ≈ Y
         @test m[2] ≈ dY2
     end
-    @test ismissing(standard_master_curve(s, 0.0, 4))
-    @test ismissing(standard_master_curve(s, 3.0, 8))
+    @test ismissing(standard_master_curve(s, 0.0, curve(4)))
+    @test ismissing(standard_master_curve(s, 3.0, curve(8)))
     @test s(0.0, 0.0, 0.0) ≈ 0.5113810925012936
 
     # x = 2 coincides with the last point of L=6: the closed bracket x[j] ≤ x ≤ x[j + 1]
     # selects (0.5, 2.0) from L=6, while L=8 brackets it with (1.0, 3.0).
-    @test select_subset(s, 2.0, 4)[1] == [0.5, 2.0, 1.0, 3.0]
+    @test select_subset(s, 2.0, curve(4))[1] == [0.5, 2.0, 1.0, 3.0]
     # on an interior knot, the pair starting at the knot is used
-    @test select_subset(s, 1.0, 6)[1] == [1.0, 2.0, 1.0, 3.0]
+    @test select_subset(s, 1.0, curve(6))[1] == [1.0, 2.0, 1.0, 3.0]
 end
 
 @testset "window" begin
@@ -588,6 +613,68 @@ end
         @test p_s[1] < inv_ν - 0.2
         @test c_s > c_f
     end
+end
+
+@testset "curve groups" begin
+    # One curve per size and value of `u`, with a u-dependent background: only the joint
+    # fit over all u sees the same master curve.
+    inv_ν, y0 = 1.5, 0.1
+    α0, β0, xc0 = 0.4, -5.0, 0.06
+    f(z) = 0.01 * tanh(5z)
+    g(L, x, u) = u + α0 * u^2 + β0 * (x - xc0) * u^2 + L^(-y0) * f(L^inv_ν * (x - xc0))
+    us = (-0.2, 0.1, 0.3)
+    parts = [
+        (; d..., u=fill(u, length(d.x)))
+        for u in us
+        for d in (synthetic((L, x) -> g(L, x, u); sizes=5:8,
+            xs=range(0.045, 0.075; length=61), σ=5e-5, rng=Xoshiro(round(Int, 10u) + 5)),)
+    ]
+    data = map((cols...) -> vcat(cols...), parts...)
+    ans = @ansatz (α, β, x_c) -> :L^$y0 * ((:y ± :y_err) - :u - α * :u^2 -
+        β * (:x - x_c) * :u^2) ~ :L^$inv_ν * (:x - x_c) group=:u
+
+    # without `group`, the rows of different u share (L, x)
+    plain = @ansatz (α, β, x_c) -> :L^$y0 * ((:y ± :y_err) - :u - α * :u^2 -
+        β * (:x - x_c) * :u^2) ~ :L^$inv_ν * (:x - x_c) x=:x
+    @test_throws r"duplicate rows for L=5, `x`" Autoscaler(data, plain)
+
+    win = (xc0 - 0.004, xc0 + 0.004)
+    s = Autoscaler(data, ans; eval_window=win)
+    @test length(s.curve_ranges) == 4 * length(us)
+    @test s.curve_labels[1:2] == ["L=5, u=-0.2", "L=5, u=0.1"]
+    @test all(s.curve_ranges) do r
+        allequal(view(s.data.u, r)) && allequal(view(s.sizes, r))
+    end
+
+    p, c = fit(s, [0.3, -4.0, 0.061])
+    @test p[1] ≈ α0 atol = 0.02
+    @test p[2] ≈ β0 atol = 0.5
+    @test p[3] ≈ xc0 atol = 5e-4
+    @test c < 2
+    @test cost_breakdown(s, p).penalty < 0.1
+
+    t = to_table(s, p)
+    @test keys(t) == (:L, :u, :x, :y, :y_err, :master_curve, :in_window)
+    @test t.u == s.data.u
+
+    for kw in ((;), (; classic_cost_function=true))
+        @test isfinite(Autoscaler(data, ans; kw...)(p))
+    end
+
+    # group values must be numbers; -0.0 and 0.0 are the same curve
+    labelled = (; data..., u=string.(data.u))
+    @test_throws r"column `u` must hold real numbers" Autoscaler(labelled, ans)
+    one_u = map(v -> v[data.u .== 0.1], data)
+    signed = (; one_u..., u=ifelse.(isodd.(eachindex(one_u.u)), -0.0, 0.0))
+    sz = Autoscaler(signed, ans)
+    @test length(sz.curve_ranges) == 4
+    @test isfinite(sz(p))
+
+    dup = map(v -> [v; v[1]], data)
+    @test_throws r"duplicate rows for L=5, u=-0.2" Autoscaler(dup, ans)
+    # two points of (L=5, u=-0.2) and (L=6, u=-0.2), one of (L=5, u=0.1)
+    one = map(v -> v[[1, 2, 62, 63, 4 * 61 + 1]], data)
+    @test_throws r"L=5, u=0.1 has fewer than two" Autoscaler(one, ans)
 end
 
 ###

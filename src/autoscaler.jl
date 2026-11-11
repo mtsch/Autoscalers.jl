@@ -15,21 +15,22 @@ parameters (in the order of `ansatz.param_names`, skipping hardcoded ones) retur
 * `classic_cost_function`: use the cost function of
   [Houdayer & Hartmann (2004)](https://doi.org/10.1103/PhysRevB.70.014418) (per-point,
   local linear master curve) instead of the integral cost.
-* `use_all_sizes`: include a curve's own size when building the master curve it is compared
-  to (default: leave it out).
+* `use_all_sizes`: include a point's own curve when building the master curve it is
+  compared to (default: leave it out).
 * `window_width`: fraction of the scaled overlap window used by the integral cost.
 * `eval_window = (lo, hi)`: use the fixed-window cost. Only data points with
   `lo ≤ x ≤ hi` in the *raw* (unscaled) `x` are scored, independently of the parameters.
-  Points outside it still serve as interpolation knots. Where another size does not cover a
-  point's scaled `x`, its curve is extrapolated linearly and a smooth penalty `penalty * d^2`
-  is added (`d` = distance outside, in units of that size's scaled range).
+  Points outside it still serve as interpolation knots. Where another curve does not cover
+  a point's scaled `x`, that curve is extrapolated linearly and a smooth penalty
+  `penalty * d^2` is added (`d` = distance outside, in units of that curve's scaled range).
 * `fix`: `NamedTuple` of parameters held at fixed values, e.g. `fix=(; a=1/ν)`. They are
   left out of the arguments of the cost function.
 
+A curve is the data of one size, or of one combination of size and `ansatz.group` values.
 Only the columns used by `ansatz` are read. Rows with missing or non-finite values in them,
 or with a non-positive error, are skipped with a warning. System sizes must be positive
-integers, each size needs at least two usable rows, and no two rows may share the same size
-and `x`.
+integers, there must be at least two of them, each curve needs at least two usable rows, and
+no two rows of a curve may share the same `x`.
 
 The `Autoscaler` reuses internal buffers between calls, so a single instance must not be
 evaluated from several threads at once.
@@ -43,7 +44,7 @@ evaluated from several threads at once.
 struct Autoscaler{P,A<:Ansatz{P},D<:NamedTuple,E<:NamedTuple}
     ansatz::A
 
-    # Columns used by the ansatz, sorted by size and `x`, and for each of them `nothing` or
+    # Columns used by the ansatz, sorted by curve and `x`, and for each of them `nothing` or
     # the index of its partial derivative (see `error_dual`) and its errors.
     data::D
     errors::E
@@ -53,8 +54,10 @@ struct Autoscaler{P,A<:Ansatz{P},D<:NamedTuple,E<:NamedTuple}
     y_err_scaled::Vector{Float64}
     sizes::Vector{Int}
 
-    avail_sizes::Vector{Int}
-    size_map::Dict{Int,UnitRange{Int}}
+    # Curve index of each row, the rows of each curve, and a name for messages.
+    curve::Vector{Int}
+    curve_ranges::Vector{UnitRange{Int}}
+    curve_labels::Vector{String}
 
     # Scratch space for the classic cost function.
     selected_x_val::Vector{Float64}
@@ -98,11 +101,17 @@ function Autoscaler(
     x = ansatz.x
     columns = ansatz.columns
     error_columns = Tuple(ansatz.errors)
+    used = (columns..., error_columns...)
     n_missing = n_nonfinite = n_bad_err = 0
     rows = filter(collect(Tables.rows(table))) do row
-        values = map(c -> Tables.getcolumn(row, c), (columns..., error_columns...))
+        values = map(c -> Tables.getcolumn(row, c), used)
         if any(ismissing, values)
             n_missing += 1
+        elseif any(v -> !(v isa Real), values)
+            k = findfirst(v -> !(v isa Real), values)
+            throw(ArgumentError(
+                "column `$(used[k])` must hold real numbers, got $(repr(values[k]))"
+            ))
         elseif !all(isfinite, values)
             n_nonfinite += 1
         elseif any(c -> Tables.getcolumn(row, c) ≤ 0, error_columns)
@@ -124,7 +133,13 @@ function Autoscaler(
         names = join(("`$c`" for c in error_columns), ", ")
         @warn "Skipping $n_bad_err rows with non-positive errors in $names."
     end
-    sort!(rows; by=r -> (Tables.getcolumn(r, L), Tables.getcolumn(r, x)))
+    group = ansatz.group
+    # `+ 0.0` turns `-0.0` into `0.0`: sorting tells them apart but `==` does not, so
+    # they would otherwise end up as one curve with its rows out of order.
+    function curve_key(r)
+        return (Tables.getcolumn(r, L), map(c -> Tables.getcolumn(r, c) + 0.0, group)...)
+    end
+    sort!(rows; by=r -> (curve_key(r)..., Tables.getcolumn(r, x)))
 
     sizes = Int[Tables.getcolumn(r, L) for r in rows]
     x_raw = Float64[Tables.getcolumn(r, x) for r in rows]
@@ -140,29 +155,28 @@ function Autoscaler(
         end
     end)
 
-    avail_sizes = Int[]
-    size_map = Dict{Int,UnitRange{Int}}()
-    prev_size = -1
-    start_index = 0
-    for (i, curr_size) in enumerate(sizes)
-        if curr_size ≠ prev_size
-            if prev_size > 0
-                size_map[prev_size] = start_index:(i - 1)
-            end
-            push!(avail_sizes, curr_size)
-            prev_size = curr_size
-            start_index = i
+    isempty(rows) && throw(ArgumentError("no usable data"))
+    curve = Vector{Int}(undef, length(rows))
+    curve_ranges = UnitRange{Int}[]
+    curve_labels = String[]
+    for (i, r) in enumerate(rows)
+        if i == 1 || curve_key(r) ≠ curve_key(rows[i - 1])
+            push!(curve_ranges, i:i)
+            label = join(("$n=$v" for (n, v) in zip((L, group...), curve_key(r))), ", ")
+            push!(curve_labels, label)
         elseif x_raw[i] == x_raw[i - 1]
-            # Interpolation and the classic cost need strictly increasing x within a size.
-            throw(ArgumentError("duplicate rows for L=$curr_size, `$x`=$(x_raw[i])"))
+            # Interpolation and the classic cost need strictly increasing x within a curve.
+            label = curve_labels[end]
+            throw(ArgumentError("duplicate rows for $label, `$x`=$(x_raw[i])"))
+        else
+            curve_ranges[end] = first(curve_ranges[end]):i
         end
+        curve[i] = length(curve_ranges)
     end
-    isempty(avail_sizes) && throw(ArgumentError("no usable data"))
-    length(avail_sizes) ≥ 2 || throw(ArgumentError("need at least two system sizes"))
-    size_map[prev_size] = start_index:length(sizes)
-    for l in avail_sizes
-        if length(size_map[l]) < 2
-            throw(ArgumentError("system size L=$l has fewer than two usable data points"))
+    length(unique(sizes)) ≥ 2 || throw(ArgumentError("need at least two system sizes"))
+    for (range, label) in zip(curve_ranges, curve_labels)
+        if length(range) < 2
+            throw(ArgumentError("$label has fewer than two usable data points"))
         end
     end
 
@@ -175,9 +189,9 @@ function Autoscaler(
         ew = (Float64(eval_window[1]), Float64(eval_window[2]))
         ew[1] < ew[2] || throw(ArgumentError("`eval_window` must satisfy lo < hi"))
         eval_mask = BitVector(ew[1] .≤ x_raw .≤ ew[2])
-        for l in avail_sizes
-            if !any(view(eval_mask, size_map[l]))
-                @warn "System size L=$l has no data points inside `eval_window`; " *
+        for (range, label) in zip(curve_ranges, curve_labels)
+            if !any(view(eval_mask, range))
+                @warn "$label has no data points inside `eval_window`; " *
                       "it will only be used for interpolation."
             end
         end
@@ -189,7 +203,7 @@ function Autoscaler(
     result = Autoscaler(
         ansatz, data, errors,
         zeros(n), zeros(n), zeros(n),
-        sizes, avail_sizes, size_map,
+        sizes, curve, curve_ranges, curve_labels,
         Float64[], Float64[], Float64[],
         fill(NaN, n_params), zeros(n_params),
         classic_cost_function, use_all_sizes, Float64(window_width),
@@ -222,7 +236,7 @@ function Autoscaler(a::Autoscaler; data=a.data, fix=(;))
     result = Autoscaler(
         a.ansatz, data, a.errors,
         zeros(n), zeros(n), zeros(n),
-        a.sizes, a.avail_sizes, a.size_map,
+        a.sizes, a.curve, a.curve_ranges, a.curve_labels,
         Float64[], Float64[], Float64[],
         copy(a.hardcodes), zeros(length(a.last_params)),
         a.classic_cost_function, a.use_all_sizes, a.window_width,
@@ -282,12 +296,12 @@ function transform!(a::Autoscaler, params)
         a.x_val_scaled[i] = scaled_x(x)
         a.y_val_scaled[i], a.y_err_scaled[i] = scaled_y(y)
     end
-    # Interpolation and the overlap window assume ascending scaled `x` within each size.
-    for size in a.avail_sizes
-        if !issorted(view(a.x_val_scaled, a.size_map[size]))
+    # Interpolation and the overlap window assume ascending scaled `x` within each curve.
+    for (range, label) in zip(a.curve_ranges, a.curve_labels)
+        if !issorted(view(a.x_val_scaled, range))
             throw(ArgumentError(
-                "scaled `x` is not ascending for L=$size at parameters $params; the " *
-                "ansatz must map `x` to an increasing function of `x` for every size"
+                "scaled `x` is not ascending for $label at parameters $params; the " *
+                "ansatz must map `x` to an increasing function of `x` for every curve"
             ))
         end
     end
@@ -316,8 +330,10 @@ Unscaled `x` of all data points, in the internal order.
 """
 raw_x(a::Autoscaler) = a.data[a.ansatz.x]
 
-function scaled_data(a::Autoscaler, size)
-    range = a.size_map[size]
+n_curves(a::Autoscaler) = length(a.curve_ranges)
+
+function scaled_data(a::Autoscaler, curve)
+    range = a.curve_ranges[curve]
     return (
         x_val=view(a.x_val_scaled, range),
         y_val=view(a.y_val_scaled, range),
@@ -328,14 +344,14 @@ end
 """
     window(a::Autoscaler)
 
-Overlap of the scaled `x` ranges of all sizes, shrunk to a fraction `a.window_width`
+Overlap of the scaled `x` ranges of all curves, shrunk to a fraction `a.window_width`
 (shrinking the side further from zero first). Used by the integral cost function.
 """
 function window(a::Autoscaler)
     lo = -Inf
     hi = Inf
-    for size in a.avail_sizes
-        x_scaled = scaled_data(a, size).x_val
+    for c in 1:n_curves(a)
+        x_scaled = scaled_data(a, c).x_val
         lo = max(lo, first(x_scaled))
         hi = min(hi, last(x_scaled))
     end
@@ -401,25 +417,30 @@ end
     to_table(a::Autoscaler, args...)
 
 Scale the data with the free parameters `args` and return a named tuple of columns
-`L`, `x`, `y`, `y_err` (scaled), `master_curve` (value of the master curve the point is
-compared to), and `in_window` (whether the point is scored by the fixed-window cost).
+`L`, the `group` columns of the ansatz, `x`, `y`, `y_err` (scaled), `master_curve` (value of
+the master curve the point is compared to), and `in_window` (whether the point is scored by
+the fixed-window cost).
 """
 to_table(a::Autoscaler, args::Vararg{Real}) = to_table(a, args)
 function to_table(a::Autoscaler, args::Union{AbstractVector,Tuple})
     params = get_parameters!(a, args)
     transform!(a, params)
     if !isnothing(a.eval_window)
-        master = [fixed_master_curve(a, x, L).Y for (x, L) in zip(a.x_val_scaled, a.sizes)]
+        master = [fixed_master_curve(a, x, c).Y for (x, c) in zip(a.x_val_scaled, a.curve)]
     elseif a.classic_cost_function
-        master = map(zip(a.x_val_scaled, a.sizes)) do (x, L)
-            m = standard_master_curve(a, x, L)
+        master = map(zip(a.x_val_scaled, a.curve)) do (x, c)
+            m = standard_master_curve(a, x, c)
             ismissing(m) ? NaN : m[1]
         end
     else
-        master = [first(new_master_curve(a, x, L)) for (x, L) in zip(a.x_val_scaled, a.sizes)]
+        master = map(zip(a.x_val_scaled, a.curve)) do (x, c)
+            first(new_master_curve(a, x, c))
+        end
     end
+    group = a.ansatz.group
     return (;
         L=copy(a.sizes),
+        NamedTuple{group}(map(c -> copy(a.data[c]), group))...,
         x=copy(a.x_val_scaled),
         y=copy(a.y_val_scaled),
         y_err=copy(a.y_err_scaled),
