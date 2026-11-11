@@ -6,8 +6,9 @@
 """
     select_subset(c::Autoscaler, selected_x, selected_curve)
 
-From every curve other than `selected_curve`, select the two neighbouring points `j, j + 1`
-with `x[j] ≤ selected_x ≤ x[j + 1]`, or nothing if that curve does not bracket `selected_x`
+From every curve other than `selected_curve`, select the two neighbouring points ``j`` and
+``j + 1`` with ``x_j ≤ x_\\mathrm{sel} ≤ x_{j+1}``, where ``x_\\mathrm{sel}`` is
+`selected_x`, or nothing if that curve does not bracket it
 ([Houdayer & Hartmann (2004)](https://doi.org/10.1103/PhysRevB.70.014418), Appendix A).
 """
 function select_subset(c::Autoscaler, selected_x, selected_curve)
@@ -64,8 +65,8 @@ end
 """
     standard_cost_function(c::Autoscaler, params)
 
-Quality `S` of Eq. A1: the mean of `(y - Y)^2 / (dy^2 + dY^2)` over all points for which the
-master curve is defined. `Inf` if it is defined for none.
+Quality ``S`` of Eq. A1: the mean of ``(y - Y)^2 / (δy^2 + δY^2)`` over all points for
+which the master curve ``Y ± δY`` is defined. `Inf` if it is defined for none.
 
 # References
 

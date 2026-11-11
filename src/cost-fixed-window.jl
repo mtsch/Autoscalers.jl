@@ -61,9 +61,23 @@ fixed_window_cost(a::Autoscaler, params) = fixed_window_breakdown(a, params).cos
 """
     cost_breakdown(a::Autoscaler, args...)
 
-Return `(; cost, chi2, penalty)` at the free parameters `args` (same convention as calling
-the `Autoscaler`). Requires `eval_window`. A non-negligible `penalty` means the fit relies on
-extrapolated curves; shrink `eval_window`.
+The fixed-window cost at the free parameters `args`, split into its parts: a `NamedTuple`
+`(; cost, chi2, penalty)` with `cost = chi2 + penalty`. Requires `eval_window`.
+
+A non-negligible `penalty` means the collapse relies on extrapolating curves beyond their
+data; shrink `eval_window` until it vanishes.
+
+# Examples
+
+```jldoctest
+julia> data = [(; L, x, y=L^-0.25 * tanh(L * (x - 0.3)), y_err=1e-3)
+               for L in (8, 16, 32) for x in 0.2:0.005:0.4];
+
+julia> s = Autoscaler(data; eval_window=(0.28, 0.32));
+
+julia> map(c -> round(c; digits=3), cost_breakdown(s, 1.0, 0.25, 0.3))
+(cost = 0.005, chi2 = 0.005, penalty = 0.0)
+```
 """
 function cost_breakdown(a::Autoscaler, args::Union{AbstractVector,Tuple})
     isnothing(a.eval_window) && throw(ArgumentError("`eval_window` is not set"))

@@ -1,39 +1,73 @@
 """
     Autoscaler(
         table, ansatz::Ansatz=DEFAULT_ANSATZ;
-        classic_cost_function=false,
-        use_all_sizes=false,
-        window_width=1,
         eval_window=nothing,
         penalty=100.0,
+        classic_cost_function=false,
+        window_width=1,
+        use_all_sizes=false,
         fix=(;),
     )
 
-Prepare `table` for finite-size scaling with `ansatz`. Calling the result with the free
-parameters (in the order of `ansatz.param_names`, skipping hardcoded ones) returns the cost.
+Prepare the data in `table` (any Tables.jl table) for a data collapse with `ansatz`. The
+default ansatz is `@ansatz (a, b, x_c) -> :L^b * (:y ± :y_err) ~ :L^a * (:x - x_c)`.
 
-* `classic_cost_function`: use the cost function of
-  [Houdayer & Hartmann (2004)](https://doi.org/10.1103/PhysRevB.70.014418) (per-point,
-  local linear master curve) instead of the integral cost.
-* `use_all_sizes`: include a point's own curve when building the master curve it is
-  compared to (default: leave it out).
-* `window_width`: fraction of the scaled overlap window used by the integral cost.
-* `eval_window = (lo, hi)`: use the fixed-window cost. Only data points with
-  `lo ≤ x ≤ hi` in the *raw* (unscaled) `x` are scored, independently of the parameters.
-  Points outside it still serve as interpolation knots. Where another curve does not cover
-  a point's scaled `x`, that curve is extrapolated linearly and a smooth penalty
-  `penalty * d^2` is added (`d` = distance outside, in units of that curve's scaled range).
-* `fix`: `NamedTuple` of parameters held at fixed values, e.g. `fix=(; a=1/ν)`. They are
-  left out of the arguments of the cost function.
+Calling the `Autoscaler` with values of the free parameters returns the cost of the
+collapse, which [`fit_collapse`](@ref) minimises. The parameters are those of
+`ansatz.param_names`, in that order, without the fixed ones.
 
-A curve is the data of one size, or of one combination of size and `ansatz.group` values.
-Only the columns used by `ansatz` are read. Rows with missing or non-finite values in them,
-or with a non-positive error, are skipped with a warning. System sizes must be positive
-integers, there must be at least two of them, each curve needs at least two usable rows, and
-no two rows of a curve may share the same `x`.
+# Cost functions
 
-The `Autoscaler` reuses internal buffers between calls, so a single instance must not be
-evaluated from several threads at once.
+Each data point is compared with the master curve built from all *other* curves (a curve
+is one size, or one combination of size and `ansatz.group` values).
+
+* **Fixed window** (`eval_window = (lo, hi)`, recommended): only points with
+  ``\\mathrm{lo} ≤ x ≤ \\mathrm{hi}`` in the *unscaled* ``x`` are scored, so the scored set
+  does not change with the parameters. Points outside it still serve for interpolation.
+  Where another curve does not reach a point's scaled ``x``, it is extrapolated linearly
+  and `penalty` ``× d^2`` is added, with ``d`` the distance outside in units of that
+  curve's scaled range.
+* **Classic** (`classic_cost_function=true`): the cost of Houdayer & Hartmann (2004), with
+  a local linear fit through the neighbouring points of the other curves.
+* **Integral** (default): squared deviations from the master curve, integrated over the
+  overlap of all curves, shrunk to the fraction `window_width`.
+
+# Keywords
+
+* `use_all_sizes`: also include a point's own curve in its master curve (integral and
+  fixed-window costs).
+* `fix`: parameters held at fixed values, e.g. `fix=(; a=1/ν)`. They are left out of the
+  arguments of the cost.
+
+# Data requirements
+
+* Only the columns used by `ansatz` are read. Rows with missing or non-finite values in
+  them, or with a non-positive error, are skipped with a warning.
+* Sizes must be positive integers, and there must be at least two of them.
+* Each curve needs at least two rows, with distinct `x`.
+
+An `Autoscaler` reuses internal buffers, so one instance must not be evaluated from several
+threads at once; see `Autoscaler(::Autoscaler)` for independent copies.
+
+# Examples
+
+```jldoctest
+julia> data = [(; L, x, y=L^-0.25 * tanh(L * (x - 0.3)), y_err=1e-3)
+               for L in (8, 16, 32) for x in 0.2:0.005:0.4];
+
+julia> s = Autoscaler(data; eval_window=(0.28, 0.32));
+
+julia> round(s(1.0, 0.25, 0.3); digits=3)  # a, b, x_c: a good collapse
+0.005
+
+julia> round(s(1.2, 0.25, 0.3); digits=1)  # a bad one
+270.2
+
+julia> s_b = Autoscaler(data; eval_window=(0.28, 0.32), fix=(; b=0.25));
+
+julia> s_b(1.0, 0.3) == s(1.0, 0.25, 0.3)
+true
+```
 
 # References
 
@@ -222,9 +256,25 @@ end
 """
     Autoscaler(a::Autoscaler; data=a.data, fix=(;))
 
-A copy of `a` with its own buffers, so it can be evaluated concurrently with `a`. `data`
-replaces the data columns; it must have the same columns and rows as `a.data`, in the same
-order. The parameters in `fix` are held fixed in addition to those already fixed in `a`.
+A copy of `a` with its own buffers, so it can be evaluated concurrently with `a`.
+
+* `data` replaces the data columns. It must have the same columns and rows as `a.data`,
+  in the same order.
+* `fix` fixes parameters in addition to those already fixed in `a`.
+
+# Examples
+
+```jldoctest
+julia> data = [(; L, x, y=L^-0.25 * tanh(L * (x - 0.3)), y_err=1e-3)
+               for L in (8, 16, 32) for x in 0.2:0.005:0.4];
+
+julia> s = Autoscaler(data; eval_window=(0.28, 0.32));
+
+julia> c = Autoscaler(s; fix=(; b=0.25));
+
+julia> c(1.0, 0.3) == s(1.0, 0.25, 0.3)
+true
+```
 """
 function Autoscaler(a::Autoscaler; data=a.data, fix=(;))
     for k in keys(fix)
@@ -268,8 +318,8 @@ const ErrorTag = ForwardDiff.Tag{ErrorPropagation}
     error_dual(tag, value, (slot, errors), i, ::Val{K})
 
 `value` as a dual number whose `slot`-th of `K` partials is its error. Propagated through
-the ansatz, the partials of the scaled `y` are then `∂y/∂c * σ_c` for each column `c` with
-errors, and their norm is the first-order error of the scaled `y`.
+the ansatz, the partials of the scaled ``y`` are then ``σ_c \\, ∂y/∂c`` for each column
+``c`` with errors, and their norm is the first-order error of the scaled ``y``.
 """
 function error_dual(::T, value, (slot, errors), i, ::Val{K}) where {T,K}
     return Dual{T}(value, ntuple(j -> j == slot ? errors[i] : 0.0, Val(K)))
@@ -416,10 +466,31 @@ end
 """
     to_table(a::Autoscaler, args...)
 
-Scale the data with the free parameters `args` and return a named tuple of columns
-`L`, the `group` columns of the ansatz, `x`, `y`, `y_err` (scaled), `master_curve` (value of
-the master curve the point is compared to), and `in_window` (whether the point is scored by
-the fixed-window cost).
+The data scaled with the free parameters `args`, for plotting the collapse. Returns a
+`NamedTuple` of columns, one row per data point:
+
+* `L`: system size;
+* the `group` columns of the ansatz, if any;
+* `x`, `y`, `y_err`: scaled values;
+* `master_curve`: the master curve the point is compared to;
+* `in_window`: whether the point is scored by the fixed-window cost.
+
+The column names are always these, whatever the columns are called in the data.
+
+# Examples
+
+```jldoctest
+julia> data = [(; L, x, y=L^-0.25 * tanh(L * (x - 0.3)), y_err=1e-3)
+               for L in (8, 16, 32) for x in 0.2:0.005:0.4];
+
+julia> t = to_table(Autoscaler(data; eval_window=(0.28, 0.32)), 1.0, 0.25, 0.3);
+
+julia> keys(t)
+(:L, :x, :y, :y_err, :master_curve, :in_window)
+
+julia> count(t.in_window)
+27
+```
 """
 to_table(a::Autoscaler, args::Vararg{Real}) = to_table(a, args)
 function to_table(a::Autoscaler, args::Union{AbstractVector,Tuple})

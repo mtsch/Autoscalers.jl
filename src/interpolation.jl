@@ -2,6 +2,11 @@
     lerp((x1, y1), (x2, y2), x)
 
 Linearly interpolate (or extrapolate) at `x` on the line through `(x1, y1)` and `(x2, y2)`.
+
+```jldoctest
+julia> Autoscalers.lerp((0.0, 1.0), (2.0, 3.0), 1.5)
+2.5
+```
 """
 function lerp((x1, y1), (x2, y2), selected_x)
     if x1 == x2
@@ -14,8 +19,22 @@ end
 """
     interpolate(x, y, y_err, selected_x; sq_errs=false)
 
-Interpolate `y` and `y_err` (squared before interpolating if `sq_errs=true`) with knots
-in `x` at point `selected_x`. Returns `missing` outside the range of `x`.
+Linearly interpolate `y` and `y_err` between the knots `x` at `selected_x`. With
+`sq_errs=true`, the squared errors are interpolated and returned instead. Returns
+`(y, y_err)`, or `missing` outside the range of `x`.
+
+```jldoctest
+julia> x, y, y_err = [0.0, 1.0, 2.0], [0.0, 10.0, 20.0], [1.0, 1.0, 3.0];
+
+julia> Autoscalers.interpolate(x, y, y_err, 1.5)
+(15.0, 2.0)
+
+julia> Autoscalers.interpolate(x, y, y_err, 1.5; sq_errs=true)  # mean of 1² and 3²
+(15.0, 5.0)
+
+julia> Autoscalers.interpolate(x, y, y_err, 3.0)
+missing
+```
 """
 function interpolate(x, y, y_err, selected_x; sq_errs=false)
     indices = searchsorted(x, selected_x)
@@ -44,10 +63,22 @@ end
 """
     extrapolate(xs, ys, dys, x)
 
-Like `interpolate(xs, ys, dys, x; sq_errs=true)`, but defined everywhere. Outside the
-data, `y` is extended linearly from the end segment and `dy^2` is held at its end value
-(both continuous at the edge). Returns `(y, dy2, d)`, where `d` is the distance outside
-the data range in units of the range width (`0` inside).
+Like `interpolate(xs, ys, dys, x; sq_errs=true)`, but defined everywhere. Returns
+`(y, dy2, d)`. Outside the data:
+
+* `y` continues linearly from the end segment;
+* `dy2` is held at its value at the end;
+* `d` is the distance outside the data range, in units of the range width (`0` inside).
+
+```jldoctest
+julia> xs, ys, dys = [0.0, 1.0, 2.0], [0.0, 10.0, 20.0], [1.0, 1.0, 3.0];
+
+julia> Autoscalers.extrapolate(xs, ys, dys, 1.5)
+(15.0, 5.0, 0.0)
+
+julia> Autoscalers.extrapolate(xs, ys, dys, 3.0)  # half a range width beyond the end
+(30.0, 9.0, 0.5)
+```
 """
 function extrapolate(xs, ys, dys, x)
     n = length(xs)
@@ -68,8 +99,18 @@ end
 """
     master_curve(points, skip)
 
-Error-weighted mean of `points`, a collection of `(y, dy2)`, leaving out index `skip`
-(`skip = 0` uses all). Returns `(Y, dY2)`.
+Error-weighted mean `(Y, dY2)` of `points`, a collection of `(y, dy2)`, leaving out the
+point with index `skip` (`skip = 0` uses all).
+
+```jldoctest
+julia> points = [(1.0, 1.0), (3.0, 1.0), (100.0, 4.0)];
+
+julia> Autoscalers.master_curve(points, 3)
+(2.0, 0.5)
+
+julia> Autoscalers.master_curve(points, 0)  # the less precise third point pulls less
+(12.88888888888889, 0.4444444444444444)
+```
 """
 function master_curve(points, skip)
     numerator = 0.0

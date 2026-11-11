@@ -1,6 +1,8 @@
 using Documenter
 using Autoscalers
 
+DocMeta.setdocmeta!(Autoscalers, :DocTestSetup, :(using Autoscalers); recursive=true)
+
 makedocs(;
     sitename="Autoscalers.jl",
     modules=[Autoscalers],
@@ -8,7 +10,7 @@ makedocs(;
         prettyurls=get(ENV, "CI", nothing) == "true",
         edit_link="main",
     ),
-    pages=["Home" => "index.md"],
+    pages=["Home" => "index.md", "Internals" => "internals.md"],
     # Fails the build if an exported name has no docstring on a page.
     checkdocs=:exports,
 )
