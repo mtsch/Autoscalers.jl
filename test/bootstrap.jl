@@ -49,7 +49,7 @@
         flat = Ansatz((:c,); x=:x, errors=(; y=:y_err)) do row, p
             return row.x, row.y - row.y + p.c
         end
-        s = Autoscaler(exact, flat)
+        s = Autoscaler(exact, flat; window...)
         @test_throws ArgumentError Autoscalers.model_data(s, [1.0])
     end
 
