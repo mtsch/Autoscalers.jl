@@ -1,34 +1,45 @@
 """
     Ansatz(f, params; x, errors, columns=(), size=:L, group=())
 
-Scaling ansatz given as a function. `f(row, p)` returns the scaled `(x, y)` of one data
-point, where `row` is a `NamedTuple` with the columns `size`, `group`, `x`, the keys of
-`errors` and `columns`, and `p` is a `NamedTuple` of the parameters named in `params`.
+Scaling ansatz given as a function `f(row, p)` that returns the scaled `(x, y)` of one data
+point. [`@ansatz`](@ref) builds the same from a formula.
 
-Columns listed in `errors` are passed as ForwardDiff dual numbers that carry the error from
-their error column, so the uncertainty of the scaled `y` follows from first-order error
-propagation (independent errors). `f` must therefore accept any `Real`. The scaled `y` must
-depend on at least one of these columns and the scaled `x` on none.
+`row` is a `NamedTuple` of the point's values in the columns `size`, `group`, `x`, the keys
+of `errors` and `columns`. `p` is a `NamedTuple` of the parameters.
+
+The columns listed in `errors` are passed as ForwardDiff dual numbers that carry their
+errors, so the error of the scaled `y` follows from first-order error propagation
+(assuming independent errors). Therefore:
+
+* `f` must accept any `Real`, not only `Float64`;
+* the scaled `y` must depend on at least one column with errors;
+* the scaled `x` must not depend on any column with errors.
+
+# Arguments
 
 * `params`: parameter names, in the order the [`Autoscaler`](@ref) expects their values.
 * `x`: column with the unscaled `x`. Rows are sorted by it, and `eval_window` refers to it.
 * `errors`: `NamedTuple` mapping columns to their error columns, e.g. `(; E=:dE)`.
 * `columns`: further columns used by `f`.
 * `size`: column with the system size. Its values are passed as integers.
-* `group`: further columns that, with `size`, identify a curve, e.g. `group=:u` when the
-  data has one curve per size and value of `u`. Each point is compared with the master
-  curve of all other curves. Group columns must be numeric, and the data still needs at
-  least two sizes. A column name or a tuple of them; by default, the curves are
-  the sizes. Names returned by [`to_table`](@ref) (`L`, `x`, `y`, ...) cannot be used.
+* `group`: further columns (a name or a tuple of names) that identify a curve together
+  with `size`, e.g. `group=:u` when there is one curve per size and value of `u`. Each
+  point is then compared with the master curve of all other curves. By default, each
+  size is one curve. Group columns must be numeric, cannot be named like an output of
+  [`to_table`](@ref), and the data still needs at least two sizes.
 
-[`@ansatz`](@ref) builds the same from a formula.
+# Examples
 
-# Example
+```jldoctest
+julia> a = Ansatz((:a, :b, :t_c); x=:t, errors=(; E=:dE)) do row, p
+           return row.L^p.a * (row.t - p.t_c), row.L^p.b * row.E
+       end;
 
-```julia
-Ansatz((:a, :b, :t_c); x=:t, errors=(; E=:dE)) do row, p
-    return row.L^p.a * (row.t - p.t_c), row.L^p.b * row.E
-end
+julia> a.param_names
+(:a, :b, :t_c)
+
+julia> a.f((; L=4, t=0.5, E=2.0), (; a=1.0, b=0.5, t_c=0.3))  # scaled (x, y)
+(0.8, 4.0)
 ```
 """
 struct Ansatz{P,F,C<:Tuple{Vararg{Symbol}},E<:NamedTuple}
@@ -188,38 +199,63 @@ end
 """
     @ansatz (params...) -> lhs ~ rhs [size=:L] [x=:col] [group=:col]
 
-Define a scaling [`Ansatz`](@ref): the collapse is sought for `lhs` (the scaled `y`) as a
-function of `rhs` (the scaled `x`).
+Define a scaling [`Ansatz`](@ref) from a formula: the data collapse is sought for `lhs`
+(the scaled `y`) as a function of `rhs` (the scaled `x`).
 
-* `(params...)` declares the parameters, in the order the [`Autoscaler`](@ref) expects their
-  values. A single parameter can be written without parentheses.
-* `:col` refers to a column of the data. Names that are not valid identifiers can be written
-  as `:var"col name"`.
+# Syntax
+
+* `(params...) ->` declares the parameters, in the order the [`Autoscaler`](@ref) expects
+  their values. A single parameter can be written without parentheses.
+* `:col` is a column of the data. Names that are not identifiers can be written as
+  `:var"col name"`.
 * `:col ± :col_err` attaches the errors in column `col_err` to `col`. The left-hand side
   must contain at least one such column; their errors propagate into the scaled `y`.
-* `\$expr` inserts the value of `expr` when the ansatz is created.
-* Any other name, such as a function, a constant like `π` or a variable, is resolved in the
-  calling scope.
-* `size` names the column with the system size (default `:L`).
-* `x` names the column with the unscaled `x`, which the data are sorted by and `eval_window`
-  refers to. By default it is the only column on the right-hand side besides `size` and
+* `\$expr` inserts the value of `expr` once, when the ansatz is created.
+* Any other name (a function, a constant like `π`, a variable) is looked up in the calling
+  scope.
+
+# Options
+
+* `size`: column with the system size (default `:L`).
+* `x`: column with the unscaled `x`, which the rows are sorted by and `eval_window` refers
+  to. Only needed when the right-hand side uses more than one column besides `size` and
   `group`.
-* `group` names further columns (one, or a tuple) that, with `size`, identify a curve; see
-  [`Ansatz`](@ref).
+* `group`: further columns (one, or a tuple) that identify a curve together with `size`;
+  see [`Ansatz`](@ref).
 
 # Examples
 
-```julia
-@ansatz (a, b, x_c) -> :L^b * (:y ± :y_err) ~ :L^a * (:x - x_c)
+```jldoctest
+julia> a = @ansatz (a, b, x_c) -> :L^b * (:y ± :y_err) ~ :L^a * (:x - x_c);
 
-# analytic background, a fixed exponent, and different column names
-ν = 0.75
-@ansatz (A, B, t_c) -> :N^0.1 * ((:E ± :dE) - A - B * (:t - t_c)) ~
-    :N^(1/\$ν) * (:t - t_c) size=:N
+julia> a.param_names, a.x, a.errors
+((:a, :b, :x_c), :x, (y = :y_err,))
 
-# one curve per size and value of `u`, sharing one master curve
-@ansatz (α, β, t_c) -> :L^0.1 * ((:E ± :dE) - :u - α * :u^2 - β * (:t - t_c) * :u^2) ~
-    :L^1.5 * (:t - t_c) group=:u
+julia> a.f((; L=4, x=0.5, y=2.0), (; a=1.0, b=0.5, x_c=0.3))  # scaled (x, y)
+(0.8, 4.0)
+```
+
+An analytic background, a fixed exponent, and other column names:
+
+```jldoctest
+julia> ν = 0.75;
+
+julia> a = @ansatz (A, B, t_c) -> :N^0.1 * ((:E ± :dE) - A - B * (:t - t_c)) ~
+           :N^(1 / \$ν) * (:t - t_c) size=:N;
+
+julia> a.size, a.x
+(:N, :t)
+```
+
+One curve per size and value of `u`, all sharing one master curve:
+
+```jldoctest
+julia> a = @ansatz (α, β, t_c) ->
+           :L^0.1 * ((:E ± :dE) - :u - α * :u^2 - β * (:t - t_c) * :u^2) ~
+           :L^1.5 * (:t - t_c) group=:u;
+
+julia> a.group
+(:u,)
 ```
 """
 macro ansatz(lambda, options...)
