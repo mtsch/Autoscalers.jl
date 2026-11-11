@@ -169,9 +169,12 @@ struct BootstrapResult{A<:Autoscaler,M,O}
     options::O
 end
 
-function converged_samples(b::BootstrapResult)
-    if !any(b.converged)
+function converged_samples(b::BootstrapResult; minimum=1)
+    n = count(b.converged)
+    if n == 0
         throw(ArgumentError("no bootstrap replicate converged, so there is nothing to use"))
+    elseif n < minimum
+        throw(ArgumentError("needs at least $minimum converged replicates, got $n"))
     end
     return b.samples[b.converged, :]
 end
@@ -374,7 +377,8 @@ end
     stderror(b::BootstrapResult)
 
 Bootstrap standard errors of every free parameter, as a `NamedTuple`: the standard
-deviation of the samples. For asymmetric errors, prefer [`confint`](@ref).
+deviation of the samples. Needs at least two converged replicates. For asymmetric errors,
+prefer [`confint`](@ref).
 
 # Examples
 
@@ -395,7 +399,9 @@ julia> round(stderror(b).a; digits=3)
 ```
 """
 function StatsAPI.stderror(b::BootstrapResult)
-    return NamedTuple{b.param_names}(Tuple(std.(eachcol(converged_samples(b)))))
+    # The standard deviation of a single sample is NaN.
+    samples = converged_samples(b; minimum=2)
+    return NamedTuple{b.param_names}(Tuple(std.(eachcol(samples))))
 end
 
 """
@@ -426,8 +432,13 @@ the hypothesis.
   replicates whose cost increase from the constraint is at least the observed one (with
   the ``+1`` correction).
 * It can test several parameters at once and needs ``2n`` fits.
+* The observed cost increase is measured from `b.estimate`, so that should be the minimum
+  found by [`fit_collapse`](@ref). A rounded or hand-picked estimate has a higher cost,
+  which makes the observed increase too small and ``p`` too large.
 * The keywords `n` (default: the number of replicates of `b`), `rng`, `parallel` and
-  `progress` are as for [`bootstrap`](@ref).
+  `progress` are as for [`bootstrap`](@ref). The refits use the optimiser of `b`
+  (`b.method` and `b.options`, as given to [`bootstrap`](@ref)); the keyword `method` of
+  `pvalue` only chooses the test.
 
 # Examples
 

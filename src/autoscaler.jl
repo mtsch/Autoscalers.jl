@@ -146,6 +146,14 @@ function Autoscaler(
     columns = ansatz.columns
     error_columns = Tuple(ansatz.errors)
     used = (columns..., error_columns...)
+    available = Tables.columnnames(Tables.columns(table))
+    absent = [c for c in used if c ∉ available]
+    if !isempty(absent)
+        throw(ArgumentError(
+            "the table has no column " * join(("`$c`" for c in absent), ", ") *
+            " used by the ansatz"
+        ))
+    end
     n_missing = n_nonfinite = n_bad_err = 0
     rows = filter(collect(Tables.rows(table))) do row
         values = map(c -> Tables.getcolumn(row, c), used)
@@ -339,10 +347,11 @@ function transform!(a::Autoscaler, params)
     p = parameter_tuple(a.ansatz, params)
     f = a.ansatz.f
     n_errors = Val(length(a.ansatz.errors))
-    # ForwardDiff nests duals by the order in which their tags were first created, and the
-    # tag of the innermost differentiation must be the outermost dual. Creating the tag
-    # here, from the parameter type, puts it after the tags of any differentiation of the
-    # cost (whose duals are the parameters) and before any tag the ansatz creates.
+    # ForwardDiff nests duals by the order in which their tags were first created. Creating
+    # the tag here, before the ansatz runs, makes it older than any tag the ansatz creates
+    # itself, so an ansatz may use ForwardDiff on columns that carry errors. The parameters
+    # are always `Float64` (`get_parameters!` writes them into a buffer), so the cost itself
+    # cannot be differentiated with ForwardDiff.
     tag = ForwardDiff.Tag(ErrorPropagation(), eltype(params))
     for i in eachindex(a.x_val_scaled)
         row = map(a.data, a.errors) do values, errors
@@ -448,7 +457,8 @@ The data scaled with the free parameters `args`, for plotting the collapse. Retu
 * `master_curve`: the master curve the point is compared to;
 * `in_window`: whether the point is scored by the fixed-window cost.
 
-The column names are always these, whatever the columns are called in the data.
+The column names are always these, whatever the columns are called in the data. With
+DataFrames.jl loaded, `DataFrame(a, args)` returns the same as a `DataFrame`.
 
 # Examples
 

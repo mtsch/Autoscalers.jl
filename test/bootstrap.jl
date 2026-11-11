@@ -137,6 +137,8 @@
         for (j, name) in enumerate(b.param_names)
             @test confint(one)[name] == (b.samples[1, j], b.samples[1, j])
         end
+        # but no standard deviation
+        @test_throws r"at least 2 converged" stderror(one)
     end
 
     @testset "pvalue" begin

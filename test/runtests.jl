@@ -1,4 +1,5 @@
 using Autoscalers
+using DataFrames: DataFrame
 using Autoscalers: lerp, interpolate, extrapolate, get_parameters, free_parameter_names,
     transform!, select_subset, standard_master_curve, raw_x
 using Optim
@@ -318,6 +319,10 @@ end
     @test s5.data.val == s.data.y
 
     # invalid input
+    @test_throws r"no column `w`, `y_err`, `w_err`" Autoscaler(
+        (; data.L, data.x, data.y),
+        @ansatz(a -> (:y ± :y_err) + (:w ± :w_err) ~ :L^a * :x); ALL...
+    )
     @test_throws ArgumentError Autoscaler(data; ALL..., fix=(; c=1.0))
     @test_throws ArgumentError Autoscaler(data; ALL..., fix=Dict(:a => 1.0))
     @test_throws ArgumentError Autoscaler(
@@ -432,6 +437,12 @@ end
 @testset "to_table and cost_breakdown" begin
     g(L, x) = tanh(L * (x - 0.5))
     data = synthetic(g; sizes=[4, 6, 8], xs=0:0.02:1)
+
+    # the DataFrames extension wraps to_table
+    s = Autoscaler(data; eval_window=(0.4, 0.6))
+    df = DataFrame(s, [1.0, 0.0, 0.5])
+    @test names(df) == ["L", "x", "y", "y_err", "master_curve", "in_window"]
+    @test df.y == to_table(s, 1.0, 0.0, 0.5).y
     for kw in ((; classic_cost_function=true), (; eval_window=(0.4, 0.6)))
         s = Autoscaler(data; kw...)
         t = to_table(s, 1.0, 0.0, 0.5)
