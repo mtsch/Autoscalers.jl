@@ -137,6 +137,15 @@ function replicate!(f, n; rng, parallel, progress, desc)
     return nothing
 end
 
+# One warning for all refits of a bootstrap, instead of one per refit.
+function warn_extrapolated_replicates(k, n, what; hypothesis=false)
+    k > 0 || hypothesis || return nothing
+    also = hypothesis ? " (and the fit under the hypothesis)" : ""
+    @warn "$k of $n $what$also extrapolate curves beyond their data, so their cost " *
+          "includes the extrapolation penalty; consider shrinking `eval_window`."
+    return nothing
+end
+
 """
     BootstrapResult
 
@@ -194,6 +203,9 @@ The fitted collapse is taken as the true model:
 3. Each replicate is refitted with [`fit_collapse`](@ref), using `method` and `options`,
    starting from `estimate`.
 
+If any refit extrapolates curves beyond their data (see [`fit_collapse`](@ref)), a single
+warning reports how many did.
+
 The spread of the refitted parameters estimates the statistical error only. Systematic
 errors, for example from the choice of `eval_window` or corrections to scaling, are not
 included.
@@ -250,18 +262,21 @@ function bootstrap(
     end
     model = model_data(a, estimate)
     samples = Matrix{Float64}(undef, n, length(names))
-    # Not a BitVector: its bits share words, so concurrent writes from threads would race.
+    # Not BitVectors: their bits share words, so concurrent writes from threads would race.
     converged = fill(false, n)
+    extrapolated = fill(false, n)
     replicate!(n; rng, parallel, progress, desc="Bootstrap: ") do i, rng_i
         s = Autoscaler(a; data=synthetic_data(rng_i, model, a))
-        result = fit_collapse(s, estimate; method, options)
+        result = minimize_cost(s, estimate; method, options)
         samples[i, :] .= result.params
         converged[i] = result.converged
+        extrapolated[i] = extrapolates(s, result.params)
     end
     n_failed = n - count(converged)
     if n_failed > 0
         @warn "$n_failed of $n bootstrap fits did not converge and are left out."
     end
+    warn_extrapolated_replicates(count(extrapolated), n, "bootstrap fits")
     converged = BitVector(converged)
     return BootstrapResult(a, names, estimate, samples, converged, method, options)
 end
@@ -493,7 +508,7 @@ function null_pvalue(
     constrained = Autoscaler(a; fix=(; hypotheses...))
     fixed_names = first.(hypotheses)
     free = [i for (i, name) in enumerate(b.param_names) if name ∉ fixed_names]
-    fit = fit_collapse(constrained, b.estimate[free]; b.method, b.options)
+    fit = minimize_cost(constrained, b.estimate[free]; b.method, b.options)
     if !fit.converged
         throw(ArgumentError(
             "the fit under the hypothesis did not converge; adjust `options` of `bootstrap`"
@@ -509,15 +524,24 @@ function null_pvalue(
     end
     model = model_data(constrained, fit.params)
     statistics = fill(NaN, n)
+    extrapolated = fill(false, n)
     replicate!(n; rng, parallel, progress, desc="Bootstrap test: ") do i, rng_i
         data = synthetic_data(rng_i, model, a)
-        free_fit = fit_collapse(Autoscaler(a; data), start; b.method, b.options)
+        free_data = Autoscaler(a; data)
+        free_fit = minimize_cost(free_data, start; b.method, b.options)
         null_data = Autoscaler(constrained; data)
-        null_fit = fit_collapse(null_data, fit.params; b.method, b.options)
+        null_fit = minimize_cost(null_data, fit.params; b.method, b.options)
         if free_fit.converged && null_fit.converged
             statistics[i] = null_fit.cost - free_fit.cost
         end
+        extrapolated[i] =
+            extrapolates(free_data, free_fit.params) ||
+            extrapolates(null_data, null_fit.params)
     end
+    warn_extrapolated_replicates(
+        count(extrapolated), n, "bootstrap test replicates";
+        hypothesis=extrapolates(constrained, fit.params),
+    )
     statistics = filter(!isnan, statistics)
     n_failed = n - length(statistics)
     if isempty(statistics)

@@ -25,6 +25,10 @@ By default this uses the Nelder–Mead simplex method with a small initial simpl
 stall in an elongated simplex. Any derivative-free Optim `method` and `options` can be
 passed instead.
 
+With the fixed-window cost, a warning is shown if the fitted collapse extrapolates curves
+beyond their data, i.e. its extrapolation penalty is not zero. It suggests the widest part
+of `eval_window` around its centre that needs no extrapolation.
+
 # Examples
 
 ```jldoctest
@@ -44,6 +48,17 @@ julia> round.(fit.params; digits=3)  # a, b, x_c
 ```
 """
 function fit_collapse(
+    a::Autoscaler, x0;
+    method=default_fit_method(), options=default_fit_options(), restarts=1,
+)
+    fit = minimize_cost(a, x0; method, options, restarts)
+    warn_extrapolation(a, fit.params)
+    return fit
+end
+
+# `fit_collapse` without the warning, for the many refits of the bootstrap, which report
+# extrapolation once for all replicates instead.
+function minimize_cost(
     a::Autoscaler, x0;
     method=default_fit_method(), options=default_fit_options(), restarts=1,
 )
