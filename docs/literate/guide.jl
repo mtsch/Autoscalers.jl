@@ -72,7 +72,8 @@ confint(boot)
 stderror(boot)
 
 # [`confint`](@ref) gives bias-corrected 95 % intervals, which can be asymmetric around
-# the estimate.
+# the estimate, while [`stderror`](@ref) gives the standard deviation of the bootstrap
+# samples.
 #
 # ## Testing an exponent
 #
@@ -81,6 +82,10 @@ stderror(boot)
 
 pvalue(boot, :a => 3 / 4)
 
-# so the collapse is consistent with it. [`pvalue`](@ref) with `method=:null` refits
-# under the hypothesis instead, which is slower but can test several parameters at once,
-# e.g. `pvalue(boot, :a => 3 / 4, :b => 5 / 48; method=:null)`.
+# so the collapse is consistent with it. With `method=:null`, [`pvalue`](@ref) refits
+# the collapse under the hypothesis instead. That is slower, but it can test several
+# parameters at once, here both exact exponents, ``a = 3/4`` and ``b = β/ν = 5/48``:
+
+pvalue(boot, :a => 3 / 4, :b => 5 / 48; method=:null, rng=Xoshiro(2))
+
+# The data are consistent with both.
