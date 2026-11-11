@@ -15,7 +15,6 @@ export fit_collapse, bootstrap, BootstrapResult, confint, stderror, pvalue
 include("ansatz.jl")
 include("autoscaler.jl")
 include("interpolation.jl")
-include("cost-integral.jl")
 include("cost-classic.jl")
 include("cost-fixed-window.jl")
 include("fit.jl")

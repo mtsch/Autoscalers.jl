@@ -95,31 +95,3 @@ function extrapolate(xs, ys, dys, x)
         return y, dy2, 0.0
     end
 end
-
-"""
-    master_curve(points, skip)
-
-Error-weighted mean `(Y, dY2)` of `points`, a collection of `(y, dy2)`, leaving out the
-point with index `skip` (`skip = 0` uses all).
-
-```jldoctest
-julia> points = [(1.0, 1.0), (3.0, 1.0), (100.0, 4.0)];
-
-julia> Autoscalers.master_curve(points, 3)
-(2.0, 0.5)
-
-julia> Autoscalers.master_curve(points, 0)  # the less precise third point pulls less
-(12.88888888888889, 0.4444444444444444)
-```
-"""
-function master_curve(points, skip)
-    numerator = 0.0
-    denominator = 0.0
-    for (i, (y, dy2)) in enumerate(points)
-        i == skip && continue
-        weight = 1 / dy2
-        numerator += y * weight
-        denominator += weight
-    end
-    return numerator / denominator, 1 / denominator
-end

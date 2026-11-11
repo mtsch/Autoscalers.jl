@@ -60,24 +60,21 @@ end
     # error.out: best fit for `-xr -1 1` with its S+1 error bars (the larger side)
     p_ref = [0.748386, 0.104841, 0.592686]
     p_err = [0.007462, 0.000975, 0.000075]
-    # windows matching `-xr -1 1`: the raw x range that the largest size scales onto [-1, 1],
-    # and a window width giving an overlap window of about [-0.9, 0.9]
+    # the window matching `-xr -1 1`: the raw x range that the largest size scales onto
+    # [-1, 1]
     w = 512^-p_ref[1]
     fixed = Autoscaler(data; eval_window=(p_ref[3] - w, p_ref[3] + w))
-    integral = Autoscaler(data; window_width=0.3)
 
-    # all three cost functions must find autoScale's best fit within its error bars
+    # both cost functions must find autoScale's best fit within its error bars
     x0 = [0.75, 0.104, 0.5927]
     @testset "$name" for (name, cost) in [
         "classic, -xr -1 1" => p -> classic_cost_xr(classic, p, -1, 1),
         "fixed window" => fixed,
-        "integral" => integral,
     ]
         @test all(abs.(fit_local(cost, x0) .- p_ref) .≤ p_err)
     end
 
-    # Values of the other cost functions at autoScale's best fit, with no external reference;
-    # they pin the current implementation against unintended changes.
+    # The fixed-window cost at autoScale's best fit, with no external reference; it pins
+    # the current implementation against unintended changes.
     @test fixed(p_ref) ≈ 0.9232351196024403 rtol = 1e-10
-    @test integral(p_ref) ≈ 0.8684558446640278 rtol = 1e-10
 end

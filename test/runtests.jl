@@ -1,6 +1,6 @@
 using Autoscalers
-using Autoscalers: lerp, interpolate, extrapolate, master_curve, get_parameters,
-    free_parameter_names, window, transform!, select_subset, standard_master_curve, raw_x
+using Autoscalers: lerp, interpolate, extrapolate, get_parameters, free_parameter_names,
+    transform!, select_subset, standard_master_curve, raw_x
 using Optim
 using Random
 using Statistics: quantile
@@ -46,10 +46,10 @@ std_(v) = sqrt(sum(abs2, v .- sum(v) / length(v)) / (length(v) - 1))
 ansatz_test_scale(L) = 2L
 const ANSATZ_TEST_SHIFT = 0.5
 
-const COSTS = [
-    "integral" => (;),
-    "classic" => (; classic_cost_function=true),
-]
+const COSTS = ["classic" => (; classic_cost_function=true)]
+
+# A window that scores every point, for tests where the choice of cost does not matter.
+const ALL = (; eval_window=(-Inf, Inf))
 
 @testset "Autoscalers" begin
 
@@ -87,13 +87,6 @@ const COSTS = [
     @test all(extrapolate(xs, ys, es, 3.0) .≈ (7.0, 0.09, 0.5))   # slope 3, d = 1/2
     @test all(extrapolate(xs, ys, es, -1.0) .≈ (-1.0, 0.01, 0.5))
     @test_throws ArgumentError extrapolate([0.0], [0.0], [1.0], 0.0)
-
-    # master curve: inverse-variance weighting, optional skip
-    pts = [(1.0, 1.0), (3.0, 1.0), (10.0, 0.25)]
-    Y, dY2 = master_curve(pts, 0)
-    @test Y ≈ (1 + 3 + 40) / 6
-    @test dY2 ≈ 1 / 6
-    @test master_curve(pts, 3) == (2.0, 0.5)
 end
 
 @testset "@ansatz" begin
@@ -213,19 +206,19 @@ end
     data = synthetic(g; sizes=[8, 16, 32], xs=range(0.2, 0.4; length=41), σ=1e-3)
     renamed = (; N=data.L, t=data.x, E=data.y, dE=data.y_err, h=zero(data.x))
     p = [1.1, 0.2, 0.31]
-    for kw in ((;), (; classic_cost_function=true), (; eval_window=(0.28, 0.32)))
+    for kw in ((; classic_cost_function=true), (; eval_window=(0.28, 0.32)))
         @test Autoscaler(renamed, a; kw...)(p) == Autoscaler(data; kw...)(p)
     end
 
     # only the columns used by the ansatz are read: a missing value elsewhere is ignored
     extra = (; renamed..., unused=fill(missing, length(data.x)))
-    @test @test_logs(Autoscaler(extra, a)(p)) == Autoscaler(renamed, a)(p)
+    @test @test_logs(Autoscaler(extra, a; ALL...)(p)) == Autoscaler(renamed, a; ALL...)(p)
 
     # several columns with errors: the uncertainties combine
     two = Ansatz((:a,); x=:x, errors=(; y=:y_err, z=:z_err)) do row, p
         return row.L^p.a * row.x, row.y - row.z
     end
-    s = Autoscaler((; data..., z=zero(data.y), z_err=data.y_err), two)
+    s = Autoscaler((; data..., z=zero(data.y), z_err=data.y_err), two; ALL...)
     transform!(s, [1.0])
     @test s.y_err_scaled ≈ sqrt(2) .* data.y_err
 
@@ -234,7 +227,7 @@ end
         return row.x, row.y^2 + row.y * row.z
     end
     zs = (; data..., z=fill(2.0, length(data.y)), z_err=fill(0.5, length(data.y)))
-    s = Autoscaler(zs, sq)
+    s = Autoscaler(zs, sq; ALL...)
     transform!(s, [0.0])
     y, σy, z, σz = s.data.y, last(s.errors.y), s.data.z, last(s.errors.z)
     @test s.y_err_scaled ≈ sqrt.(((2 .* y .+ z) .* σy) .^ 2 .+ (y .* σz) .^ 2)
@@ -244,14 +237,14 @@ end
     inner = Ansatz((:a,); x=:x, errors=(; y=:y_err)) do row, p
         return row.x, Autoscalers.ForwardDiff.derivative(t -> t * row.y, 1.0)
     end
-    s = Autoscaler(data, inner)
+    s = Autoscaler(data, inner; ALL...)
     transform!(s, [0.0])
     @test s.y_err_scaled ≈ data.y_err
 
     # tiny and huge errors survive propagation instead of under- or overflowing
     ident = Ansatz((row, p) -> (row.x, row.y), (); x=:x, errors=(; y=:y_err))
     for σ in (1e-200, 1e200)
-        s = Autoscaler((; data..., y_err=fill(σ, length(data.x))), ident)
+        s = Autoscaler((; data..., y_err=fill(σ, length(data.x))), ident; ALL...)
         transform!(s, Float64[])
         @test all(==(σ), s.y_err_scaled)
     end
@@ -261,7 +254,7 @@ end
         row.L isa Int || error("expected an integer size")
         return row.x, row.y
     end
-    @test Autoscaler(data, int_size)() isa Float64
+    @test Autoscaler(data, int_size; ALL...)() isa Float64
 
     # invalid definitions
     f(row, p) = (row.x, row.y)
@@ -273,16 +266,16 @@ end
     @test_throws ArgumentError Ansatz(f, (:a,); x=:x, errors=(; y=:x))
 
     # the scaled x must not carry an error, the scaled y must
-    s = Autoscaler(data, Ansatz((row, p) -> (row.y, row.y), (); x=:x, errors=(; y=:y_err)))
-    @test_throws ArgumentError s()
-    s = Autoscaler(data, Ansatz((row, p) -> (row.x, row.x), (); x=:x, errors=(; y=:y_err)))
-    @test_throws ArgumentError s()
+    for f in ((row, p) -> (row.y, row.y), (row, p) -> (row.x, row.x))
+        s = Autoscaler(data, Ansatz(f, (); x=:x, errors=(; y=:y_err)); ALL...)
+        @test_throws ArgumentError s()
+    end
 end
 
 @testset "Autoscaler construction" begin
     data = synthetic((L, x) -> x; sizes=[4, 6], xs=0:0.1:1)
 
-    s = Autoscaler(data)
+    s = Autoscaler(data; ALL...)
     @test s.curve_ranges == [1:11, 12:22]
     @test s.curve_labels == ["L=4", "L=6"]
     @test free_parameter_names(s) == (:a, :b, :x_c)
@@ -291,7 +284,7 @@ end
     # rows are sorted by (L, x) regardless of input order
     perm = randperm(Xoshiro(1), length(data.x))
     shuffled = map(v -> v[perm], data)
-    s2 = Autoscaler(shuffled)
+    s2 = Autoscaler(shuffled; ALL...)
     @test raw_x(s2) == raw_x(s)
     @test s2.sizes == s.sizes
 
@@ -307,7 +300,7 @@ end
     @test count(s3.eval_mask) == 9
 
     # hardcoded parameters
-    s4 = Autoscaler(data; fix=(; a=1.5))
+    s4 = Autoscaler(data; ALL..., fix=(; a=1.5))
     @test free_parameter_names(s4) == (:b, :x_c)
     @test get_parameters(s4, [0.1, 0.2]) == [1.5, 0.1, 0.2]
     @test_throws ArgumentError get_parameters(s4, [0.1])
@@ -320,20 +313,26 @@ end
     renamed = (; size=data.L, t=data.x, val=data.y, val_err=data.y_err)
     ans = @ansatz (a, b, x_c) -> :size^b * (:val ± :val_err) ~ :size^a * (:t - x_c) size =
         :size
-    s5 = Autoscaler(renamed, ans)
+    s5 = Autoscaler(renamed, ans; ALL...)
     @test raw_x(s5) == raw_x(s)
     @test s5.data.val == s.data.y
 
     # invalid input
-    @test_throws ArgumentError Autoscaler(data; fix=(; c=1.0))
-    @test_throws ArgumentError Autoscaler(data; fix=Dict(:a => 1.0))
-    @test_throws ArgumentError Autoscaler(synthetic((L, x) -> x; sizes=[4], xs=0:0.1:1))
+    @test_throws ArgumentError Autoscaler(data; ALL..., fix=(; c=1.0))
+    @test_throws ArgumentError Autoscaler(data; ALL..., fix=Dict(:a => 1.0))
+    @test_throws ArgumentError Autoscaler(
+        synthetic((L, x) -> x; sizes=[4], xs=0:0.1:1); ALL...
+    )
     @test_throws ArgumentError Autoscaler(data; eval_window=(2.0, 3.0))
     @test_throws ArgumentError Autoscaler(data; eval_window=(0.5, 0.4))
     @test_throws ArgumentError Autoscaler(
         data; eval_window=(0.2, 0.4), classic_cost_function=true
     )
-    @test_throws ArgumentError Autoscaler(data; window_width=0)
+    # a cost function must be chosen; `use_all_sizes` is for the fixed window only
+    @test_throws r"choose a cost function" Autoscaler(data)
+    @test_throws ArgumentError Autoscaler(
+        data; classic_cost_function=true, use_all_sizes=true
+    )
     @test_logs (:warn, r"L=6 has no data") Autoscaler(
         synthetic((L, x) -> x; sizes=[4, 6], xs=0:0.1:1) |>
         d -> (; L=d.L, x=d.x .+ (d.L .== 6) .* 10, y=d.y, y_err=d.y_err);
@@ -348,45 +347,45 @@ end
     m = map(allowmissing, data)
     m.y[3] = missing
     m.x[14] = missing
-    s = @test_logs (:warn, r"2 rows with missing") Autoscaler(m)
+    s = @test_logs (:warn, r"2 rows with missing") Autoscaler(m; ALL...)
     @test length(raw_x(s)) == 20
 
     nf = map(copy, data)
     nf.y[1] = NaN
     nf.y_err[2] = Inf
     nf.x[20] = -Inf
-    s = @test_logs (:warn, r"3 rows with non-finite") Autoscaler(nf)
+    s = @test_logs (:warn, r"3 rows with non-finite") Autoscaler(nf; ALL...)
     @test all(isfinite, s.data.y)
     @test all(isfinite, last(s.errors.y))
     @test length(raw_x(s)) == 19
 
     neg = map(copy, data)
     neg.y_err[5] = -0.1
-    s = @test_logs (:warn, r"1 rows with non-positive") Autoscaler(neg)
+    s = @test_logs (:warn, r"1 rows with non-positive") Autoscaler(neg; ALL...)
     @test all(>(0), last(s.errors.y))
 
     # each kind is reported on every construction, not just the first one
-    @test_logs (:warn, r"1 rows with non-positive") Autoscaler(neg)
+    @test_logs (:warn, r"1 rows with non-positive") Autoscaler(neg; ALL...)
 
     # system sizes
-    @test Autoscaler((; data..., L=float.(data.L))).curve_ranges == [1:11, 12:22]
-    @test_throws ArgumentError Autoscaler((; data..., L=data.L .+ 0.5))
-    @test_throws ArgumentError Autoscaler((; data..., L=data.L .- 4))
+    @test Autoscaler((; data..., L=float.(data.L)); ALL...).curve_ranges == [1:11, 12:22]
+    @test_throws ArgumentError Autoscaler((; data..., L=data.L .+ 0.5); ALL...)
+    @test_throws ArgumentError Autoscaler((; data..., L=data.L .- 4); ALL...)
 
     # every size needs two usable points, also after filtering
     one = (; L=[data.L; 8], x=[data.x; 0.5], y=[data.y; 0.5], y_err=[data.y_err; 1e-3])
-    @test_throws ArgumentError Autoscaler(one)
+    @test_throws ArgumentError Autoscaler(one; ALL...)
     thin = map(copy, data)
     thin.y_err[13:22] .= 0
-    @test_throws ArgumentError Autoscaler(thin)
+    @test_throws ArgumentError Autoscaler(thin; ALL...)
 
     # duplicate (L, x) rows, also when they are not adjacent in the input
     dup = (; L=[data.L; 6], x=[data.x; 0.3], y=[data.y; 0.3], y_err=[data.y_err; 1e-3])
-    @test_throws ArgumentError Autoscaler(dup)
+    @test_throws ArgumentError Autoscaler(dup; ALL...)
 
     # scaled x must be ascending within each size
     rev = @ansatz (a, b, x_c) -> :L^b * (:y ± :y_err) ~ :L^a * (x_c - :x)
-    s = Autoscaler(data, rev)
+    s = Autoscaler(data, rev; ALL...)
     @test_throws ArgumentError s(1.0, 0.0, 0.5)
     @test_throws ArgumentError to_table(s, 1.0, 0.0, 0.5)
 end
@@ -430,23 +429,10 @@ end
     @test select_subset(s, 1.0, curve(6))[1] == [1.0, 2.0, 1.0, 3.0]
 end
 
-@testset "window" begin
-    data = synthetic((L, x) -> x; sizes=[4, 6], xs=-1:0.1:3)
-    s = Autoscaler(data; window_width=0.5)
-    transform!(s, [0.0, 0.0, 0.0])
-    lo, hi = window(s)
-    # width 4 shrunk to 2; the side further from zero (hi) is shrunk first
-    @test hi - lo ≈ 2
-    @test (lo, hi) == (-1.0, 1.0)
-    s = Autoscaler(data)
-    transform!(s, [0.0, 0.0, 0.0])
-    @test window(s) == (-1.0, 3.0)
-end
-
 @testset "to_table and cost_breakdown" begin
     g(L, x) = tanh(L * (x - 0.5))
     data = synthetic(g; sizes=[4, 6, 8], xs=0:0.02:1)
-    for kw in ((;), (; classic_cost_function=true), (; eval_window=(0.4, 0.6)))
+    for kw in ((; classic_cost_function=true), (; eval_window=(0.4, 0.6)))
         s = Autoscaler(data; kw...)
         t = to_table(s, 1.0, 0.0, 0.5)
         @test keys(t) == (:L, :x, :y, :y_err, :master_curve, :in_window)
@@ -460,17 +446,17 @@ end
     # the master curve a point is compared to must leave out its own size
     two = (; L=[4, 4, 4, 6, 6, 6], x=[0.0, 0.5, 1.0, 0.0, 0.5, 1.0],
              y=[0.0, 0.0, 0.0, 1.0, 1.0, 1.0], y_err=fill(0.1, 6))
-    for kw in ((;), (; classic_cost_function=true), (; eval_window=(0.0, 1.0)))
+    for kw in ((; classic_cost_function=true), (; eval_window=(0.0, 1.0)))
         t = to_table(Autoscaler(two; kw...), 0.0, 0.0, 0.0)
         m4 = filter(isfinite, t.master_curve[t.L.==4])
         m6 = filter(isfinite, t.master_curve[t.L.==6])
         @test length(m4) ≥ 2 && all(≈(1.0), m4)
         @test length(m6) ≥ 2 && all(≈(0.0), m6)
     end
-    t = to_table(Autoscaler(two; use_all_sizes=true), 0.0, 0.0, 0.0)
+    t = to_table(Autoscaler(two; eval_window=(0.0, 1.0), use_all_sizes=true), 0.0, 0.0, 0.0)
     @test t.master_curve ≈ fill(0.5, 6)
 
-    s = Autoscaler(data)
+    s = Autoscaler(data; classic_cost_function=true)
     @test_throws ArgumentError cost_breakdown(s, 1.0, 0.0, 0.5)
     s = Autoscaler(data; eval_window=(0.4, 0.6))
     b = cost_breakdown(s, 1.0, 0.0, 0.5)
@@ -636,7 +622,7 @@ end
     # without `group`, the rows of different u share (L, x)
     plain = @ansatz (α, β, x_c) -> :L^$y0 * ((:y ± :y_err) - :u - α * :u^2 -
         β * (:x - x_c) * :u^2) ~ :L^$inv_ν * (:x - x_c) x=:x
-    @test_throws r"duplicate rows for L=5, `x`" Autoscaler(data, plain)
+    @test_throws r"duplicate rows for L=5, `x`" Autoscaler(data, plain; ALL...)
 
     win = (xc0 - 0.004, xc0 + 0.004)
     s = Autoscaler(data, ans; eval_window=win)
@@ -657,24 +643,24 @@ end
     @test keys(t) == (:L, :u, :x, :y, :y_err, :master_curve, :in_window)
     @test t.u == s.data.u
 
-    for kw in ((;), (; classic_cost_function=true))
+    for kw in (ALL, (; classic_cost_function=true))
         @test isfinite(Autoscaler(data, ans; kw...)(p))
     end
 
     # group values must be numbers; -0.0 and 0.0 are the same curve
     labelled = (; data..., u=string.(data.u))
-    @test_throws r"column `u` must hold real numbers" Autoscaler(labelled, ans)
+    @test_throws r"column `u` must hold real numbers" Autoscaler(labelled, ans; ALL...)
     one_u = map(v -> v[data.u .== 0.1], data)
     signed = (; one_u..., u=ifelse.(isodd.(eachindex(one_u.u)), -0.0, 0.0))
-    sz = Autoscaler(signed, ans)
+    sz = Autoscaler(signed, ans; ALL...)
     @test length(sz.curve_ranges) == 4
     @test isfinite(sz(p))
 
     dup = map(v -> [v; v[1]], data)
-    @test_throws r"duplicate rows for L=5, u=-0.2" Autoscaler(dup, ans)
+    @test_throws r"duplicate rows for L=5, u=-0.2" Autoscaler(dup, ans; ALL...)
     # two points of (L=5, u=-0.2) and (L=6, u=-0.2), one of (L=5, u=0.1)
     one = map(v -> v[[1, 2, 62, 63, 4 * 61 + 1]], data)
-    @test_throws r"L=5, u=0.1 has fewer than two" Autoscaler(one, ans)
+    @test_throws r"L=5, u=0.1 has fewer than two" Autoscaler(one, ans; ALL...)
 end
 
 ###

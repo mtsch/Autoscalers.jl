@@ -4,7 +4,6 @@
         eval_window=nothing,
         penalty=100.0,
         classic_cost_function=false,
-        window_width=1,
         use_all_sizes=false,
         fix=(;),
     )
@@ -19,23 +18,28 @@ collapse, which [`fit_collapse`](@ref) minimises. The parameters are those of
 # Cost functions
 
 Each data point is compared with the master curve built from all *other* curves (a curve
-is one size, or one combination of size and `ansatz.group` values).
+is one size, or one combination of size and `ansatz.group` values). One of the two cost
+functions must be chosen:
 
-* **Fixed window** (`eval_window = (lo, hi)`, recommended): only points with
+* **Fixed window** (`eval_window = (lo, hi)`): only points with
   ``\\mathrm{lo} ≤ x ≤ \\mathrm{hi}`` in the *unscaled* ``x`` are scored, so the scored set
   does not change with the parameters. Points outside it still serve for interpolation.
   Where another curve does not reach a point's scaled ``x``, it is extrapolated linearly
   and `penalty` ``× d^2`` is added, with ``d`` the distance outside in units of that
   curve's scaled range.
 * **Classic** (`classic_cost_function=true`): the cost of Houdayer & Hartmann (2004), with
-  a local linear fit through the neighbouring points of the other curves.
-* **Integral** (default): squared deviations from the master curve, integrated over the
-  overlap of all curves, shrunk to the fraction `window_width`.
+  a local linear fit through the neighbouring points of the other curves. It scores every
+  point where the curves overlap in the *scaled* ``x``, so for the smallest sizes it
+  reaches furthest from the transition, where corrections to scaling are largest.
+
+The scaling form holds as ``t → 0`` in the unscaled ``t``, for any scaled ``x``. A
+window in the unscaled ``x`` bounds the corrections that grow with ``|t|`` equally for all
+sizes, so the fixed window is recommended.
 
 # Keywords
 
-* `use_all_sizes`: also include a point's own curve in its master curve (integral and
-  fixed-window costs).
+* `use_all_sizes`: also include a point's own curve in its master curve (fixed-window cost
+  only).
 * `fix`: parameters held at fixed values, e.g. `fix=(; a=1/ν)`. They are left out of the
   arguments of the cost.
 
@@ -104,8 +108,6 @@ struct Autoscaler{P,A<:Ansatz{P},D<:NamedTuple,E<:NamedTuple}
     classic_cost_function::Bool
     use_all_sizes::Bool
 
-    window_width::Float64
-
     eval_window::Union{Nothing,Tuple{Float64,Float64}}
     eval_mask::BitVector
     penalty::Float64
@@ -115,7 +117,6 @@ function Autoscaler(
     table, ansatz::Ansatz=DEFAULT_ANSATZ;
     classic_cost_function=false,
     use_all_sizes=false,
-    window_width=1,
     eval_window=nothing,
     penalty=100.0,
     fix=(;),
@@ -126,10 +127,19 @@ function Autoscaler(
     for k in keys(fix)
         k in ansatz.param_names || throw(ArgumentError("`$k` in `fix` is not a parameter"))
     end
-    if !isnothing(eval_window) && classic_cost_function
-        throw(ArgumentError("`eval_window` and `classic_cost_function` are mutually exclusive"))
+    if classic_cost_function
+        isnothing(eval_window) || throw(ArgumentError(
+            "`eval_window` and `classic_cost_function` are mutually exclusive"
+        ))
+        use_all_sizes && throw(ArgumentError(
+            "`use_all_sizes` applies to the fixed-window cost only"
+        ))
+    elseif isnothing(eval_window)
+        throw(ArgumentError(
+            "choose a cost function: `eval_window=(lo, hi)` scores the points with " *
+            "lo ≤ x ≤ hi, or `classic_cost_function=true`"
+        ))
     end
-    0 < window_width ≤ 1 || throw(ArgumentError("`window_width` must be in (0, 1]"))
 
     L = ansatz.size
     x = ansatz.x
@@ -240,7 +250,7 @@ function Autoscaler(
         sizes, curve, curve_ranges, curve_labels,
         Float64[], Float64[], Float64[],
         fill(NaN, n_params), zeros(n_params),
-        classic_cost_function, use_all_sizes, Float64(window_width),
+        classic_cost_function, use_all_sizes,
         ew, eval_mask, Float64(penalty),
     )
     return hardcode_params!(result, fix)
@@ -289,7 +299,7 @@ function Autoscaler(a::Autoscaler; data=a.data, fix=(;))
         a.sizes, a.curve, a.curve_ranges, a.curve_labels,
         Float64[], Float64[], Float64[],
         copy(a.hardcodes), zeros(length(a.last_params)),
-        a.classic_cost_function, a.use_all_sizes, a.window_width,
+        a.classic_cost_function, a.use_all_sizes,
         a.eval_window, a.eval_mask, a.penalty,
     )
     for (name, value) in pairs(fix)
@@ -392,43 +402,6 @@ function scaled_data(a::Autoscaler, curve)
 end
 
 """
-    window(a::Autoscaler)
-
-Overlap of the scaled `x` ranges of all curves, shrunk to a fraction `a.window_width`
-(shrinking the side further from zero first). Used by the integral cost function.
-"""
-function window(a::Autoscaler)
-    lo = -Inf
-    hi = Inf
-    for c in 1:n_curves(a)
-        x_scaled = scaled_data(a, c).x_val
-        lo = max(lo, first(x_scaled))
-        hi = min(hi, last(x_scaled))
-    end
-    if lo > hi
-        return lo, hi
-    end
-    if a.window_width ≠ 1
-        width = hi - lo
-        to_shrink = width * (1 - a.window_width)
-
-        diff = abs(hi) - abs(lo)
-        if diff < 0
-            step = min(-diff, to_shrink)
-            lo += step
-        else
-            step = min(diff, to_shrink)
-            hi -= step
-        end
-        to_shrink -= step
-
-        lo += to_shrink / 2
-        hi -= to_shrink / 2
-    end
-    return lo, hi
-end
-
-"""
     get_parameters(a::Autoscaler, args)
 
 Combine the free parameters `args` with the hardcoded ones into the full parameter vector.
@@ -496,17 +469,13 @@ to_table(a::Autoscaler, args::Vararg{Real}) = to_table(a, args)
 function to_table(a::Autoscaler, args::Union{AbstractVector,Tuple})
     params = get_parameters!(a, args)
     transform!(a, params)
-    if !isnothing(a.eval_window)
-        master = [fixed_master_curve(a, x, c).Y for (x, c) in zip(a.x_val_scaled, a.curve)]
-    elseif a.classic_cost_function
+    if a.classic_cost_function
         master = map(zip(a.x_val_scaled, a.curve)) do (x, c)
             m = standard_master_curve(a, x, c)
             ismissing(m) ? NaN : m[1]
         end
     else
-        master = map(zip(a.x_val_scaled, a.curve)) do (x, c)
-            first(new_master_curve(a, x, c))
-        end
+        master = [fixed_master_curve(a, x, c).Y for (x, c) in zip(a.x_val_scaled, a.curve)]
     end
     group = a.ansatz.group
     return (;
@@ -521,11 +490,9 @@ function to_table(a::Autoscaler, args::Union{AbstractVector,Tuple})
 end
 
 function cost_function(a::Autoscaler, params)
-    if !isnothing(a.eval_window)
-        return fixed_window_cost(a, params)
-    elseif a.classic_cost_function
+    if a.classic_cost_function
         return standard_cost_function(a, params)
     else
-        return new_cost_function(a, params)
+        return fixed_window_cost(a, params)
     end
 end
