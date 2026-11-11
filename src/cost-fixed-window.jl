@@ -33,7 +33,7 @@ with at least one scored point.
 function fixed_window_breakdown(a::Autoscaler, params)
     transform!(a, params)
     chi2_total = pen_total = 0.0
-    n_curves = 0
+    n_scored = 0
     for (c, range) in enumerate(a.curve_ranges)
         chi2 = pen = 0.0
         n = 0
@@ -47,12 +47,12 @@ function fixed_window_breakdown(a::Autoscaler, params)
         n == 0 && continue
         chi2_total += chi2 / n
         pen_total += pen / n
-        n_curves += 1
+        n_scored += 1
     end
     return (;
-        cost=(chi2_total + pen_total) / n_curves,
-        chi2=chi2_total / n_curves,
-        penalty=pen_total / n_curves,
+        cost=(chi2_total + pen_total) / n_scored,
+        chi2=chi2_total / n_scored,
+        penalty=pen_total / n_scored,
     )
 end
 

@@ -661,6 +661,15 @@ end
         @test isfinite(Autoscaler(data, ans; kw...)(p))
     end
 
+    # group values must be numbers; -0.0 and 0.0 are the same curve
+    labelled = (; data..., u=string.(data.u))
+    @test_throws r"column `u` must hold real numbers" Autoscaler(labelled, ans)
+    one_u = map(v -> v[data.u .== 0.1], data)
+    signed = (; one_u..., u=ifelse.(isodd.(eachindex(one_u.u)), -0.0, 0.0))
+    sz = Autoscaler(signed, ans)
+    @test length(sz.curve_ranges) == 4
+    @test isfinite(sz(p))
+
     dup = map(v -> [v; v[1]], data)
     @test_throws r"duplicate rows for L=5, u=-0.2" Autoscaler(dup, ans)
     # two points of (L=5, u=-0.2) and (L=6, u=-0.2), one of (L=5, u=0.1)

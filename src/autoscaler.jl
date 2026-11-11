@@ -101,11 +101,17 @@ function Autoscaler(
     x = ansatz.x
     columns = ansatz.columns
     error_columns = Tuple(ansatz.errors)
+    used = (columns..., error_columns...)
     n_missing = n_nonfinite = n_bad_err = 0
     rows = filter(collect(Tables.rows(table))) do row
-        values = map(c -> Tables.getcolumn(row, c), (columns..., error_columns...))
+        values = map(c -> Tables.getcolumn(row, c), used)
         if any(ismissing, values)
             n_missing += 1
+        elseif any(v -> !(v isa Real), values)
+            k = findfirst(v -> !(v isa Real), values)
+            throw(ArgumentError(
+                "column `$(used[k])` must hold real numbers, got $(repr(values[k]))"
+            ))
         elseif !all(isfinite, values)
             n_nonfinite += 1
         elseif any(c -> Tables.getcolumn(row, c) ≤ 0, error_columns)
@@ -128,7 +134,11 @@ function Autoscaler(
         @warn "Skipping $n_bad_err rows with non-positive errors in $names."
     end
     group = ansatz.group
-    curve_key(r) = (Tables.getcolumn(r, L), map(c -> Tables.getcolumn(r, c), group)...)
+    # `+ 0.0` turns `-0.0` into `0.0`: sorting tells them apart but `==` does not, so
+    # they would otherwise end up as one curve with its rows out of order.
+    function curve_key(r)
+        return (Tables.getcolumn(r, L), map(c -> Tables.getcolumn(r, c) + 0.0, group)...)
+    end
     sort!(rows; by=r -> (curve_key(r)..., Tables.getcolumn(r, x)))
 
     sizes = Int[Tables.getcolumn(r, L) for r in rows]

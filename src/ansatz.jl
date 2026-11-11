@@ -17,7 +17,8 @@ depend on at least one of these columns and the scaled `x` on none.
 * `size`: column with the system size. Its values are passed as integers.
 * `group`: further columns that, with `size`, identify a curve, e.g. `group=:u` when the
   data has one curve per size and value of `u`. Each point is compared with the master
-  curve of all other curves. A column name or a tuple of them; by default, the curves are
+  curve of all other curves. Group columns must be numeric, and the data still needs at
+  least two sizes. A column name or a tuple of them; by default, the curves are
   the sizes. Names returned by [`to_table`](@ref) (`L`, `x`, `y`, ...) cannot be used.
 
 [`@ansatz`](@ref) builds the same from a formula.

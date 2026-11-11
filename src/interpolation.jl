@@ -51,7 +51,7 @@ the data range in units of the range width (`0` inside).
 """
 function extrapolate(xs, ys, dys, x)
     n = length(xs)
-    n ≥ 2 || throw(ArgumentError("need at least two points per system size"))
+    n ≥ 2 || throw(ArgumentError("need at least two points per curve"))
     width = xs[end] - xs[1]
     if x < xs[1]
         y = lerp((xs[1], ys[1]), (xs[2], ys[2]), x)
