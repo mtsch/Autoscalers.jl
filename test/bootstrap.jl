@@ -124,6 +124,19 @@
         @test pvalue(off, :a => lo) ≈ 0.1 atol = 0.01
         @test pvalue(off, :a => hi) ≈ 0.1 atol = 0.01
         @test pvalue(off, :a => estimate[1] + 1) < 1e-3
+
+        # ties count as half; samples all on one side are clamped to 1/(2n) from 0 or 1
+        @test Autoscalers.bias_correction([1, 2, 2, 3], 2) == 0
+        q = Autoscalers.normal_quantile
+        @test Autoscalers.bias_correction([1, 2, 3, 4], 10) ≈ q(1 - 1 / 8)
+        @test Autoscalers.bias_correction([1, 2, 3, 4], 0) ≈ q(1 / 8)
+        # a single replicate gives a finite, zero-width interval at that replicate
+        one = BootstrapResult(
+            s, b.param_names, estimate, b.samples[1:1, :], trues(1), b.method, b.options
+        )
+        for (j, name) in enumerate(b.param_names)
+            @test confint(one)[name] == (b.samples[1, j], b.samples[1, j])
+        end
     end
 
     @testset "pvalue" begin
