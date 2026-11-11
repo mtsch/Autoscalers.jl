@@ -1,5 +1,12 @@
 using Documenter
 using Autoscalers
+using Literate
+
+# The guide is a Literate script, so its code runs on every build and cannot go stale.
+Literate.markdown(
+    joinpath(@__DIR__, "literate", "guide.jl"), joinpath(@__DIR__, "src", "generated");
+    documenter=true,
+)
 
 DocMeta.setdocmeta!(Autoscalers, :DocTestSetup, :(using Autoscalers); recursive=true)
 
@@ -10,7 +17,11 @@ makedocs(;
         prettyurls=get(ENV, "CI", nothing) == "true",
         edit_link="main",
     ),
-    pages=["Home" => "index.md", "Internals" => "internals.md"],
+    pages=[
+        "Home" => "index.md",
+        "Guide" => "generated/guide.md",
+        "Internals" => "internals.md",
+    ],
     # Fails the build if an exported name has no docstring on a page.
     checkdocs=:exports,
 )
