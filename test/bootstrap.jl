@@ -33,6 +33,18 @@
             # only the first column with errors is replaced
             @test model.x == s.data.x
         end
+        # errors far below the size of the values: the scaled `y` cannot be matched to
+        # `1e-10` of its error
+        precise = (; exact..., y=exact.y .+ 100, y_err=fill(1e-8, length(exact.y)))
+        offset = @ansatz (a, b, x_c) -> :L^b * ((:y ± :y_err) - 100) ~ :L^a * (:x - x_c)
+        s = Autoscaler(precise, offset; window...)
+        model = Autoscalers.model_data(s, p)
+        transform!(s, p)
+        target = Autoscalers.pooled_master_curve(s)
+        m = Autoscalers.with_data(s, model)
+        transform!(m, p)
+        @test maximum(abs.(m.y_val_scaled .- target) ./ m.y_err_scaled) < 1e-3
+
         flat = Ansatz((:c,); x=:x, errors=(; y=:y_err)) do row, p
             return row.x, row.y - row.y + p.c
         end

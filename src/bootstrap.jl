@@ -123,7 +123,14 @@ function model_data(a::Autoscaler, params; maxiter=50)
                     "the fitted collapse cannot be mapped back to the data"
                 ))
             end
-            values[i] += residual / slope
+            step = residual / slope
+            values[i] += step
+            # With errors far below the size of the values, `tolerance` can be finer than
+            # the rounding of the scaled `y`; then a step within rounding is converged.
+            if abs(step) ≤ 4eps(abs(values[i]))
+                converged = true
+                break
+            end
         end
         if !converged
             throw(ArgumentError(
