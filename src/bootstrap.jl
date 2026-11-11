@@ -238,8 +238,9 @@ normal_quantile(p) = -√2 * erfcinv(2p)
 """
     bias_correction(samples, estimate)
 
-The bias correction `z₀ = Φ⁻¹(P(θ* < θ̂))` of the BC interval (Efron, 1987), counting
-ties as half. The fraction is kept within `1/(2n)` of 0 and 1, so that `z₀` stays finite.
+The bias correction ``z_0 = Φ^{-1}(P(θ^* < \\hat{θ}))`` of the BC interval (Efron, 1987),
+counting ties as half. The fraction is kept within ``1/(2n)`` of 0 and 1, so that ``z_0``
+stays finite.
 """
 function bias_correction(samples, estimate)
     n = length(samples)
@@ -253,14 +254,15 @@ end
 Bias-corrected percentile (BC) confidence intervals (Efron, 1987) of every free
 parameter, as a `NamedTuple` of `(lower, upper)`.
 
-The bounds are the quantiles of the bootstrap samples at levels `Φ(2z₀ ± z_{α/2})`, with
-`α = 1 - level`, where `z₀ = Φ⁻¹(P(θ* < θ̂))` measures how far the bootstrap
-distribution is off-centre from the estimate. For a centred distribution (`z₀ = 0`) this
-is the plain percentile interval. The intervals follow the
-shape of the bootstrap distribution, so they can be asymmetric around the estimate, and
-need no extra fits. On synthetic collapses they are close to their nominal coverage (see
-`test/scripts/bootstrap_coverage.jl`). A large `|z₀|` moves the levels towards 0 or 1,
-so such quantiles need correspondingly many replicates (`n ≳ 1000`).
+The bounds are the quantiles of the bootstrap samples at the levels
+``Φ(2z_0 ± z_{α/2})``, where ``Φ`` is the standard normal distribution function,
+`level` ``= 1 - α``, and ``z_0 = Φ^{-1}(P(θ^* < \\hat{θ}))`` measures how far the
+bootstrap distribution is off-centre from the estimate. For a centred distribution
+(``z_0 = 0``) this is the plain percentile interval. The intervals follow the shape of the
+bootstrap distribution, so they can be asymmetric around the estimate, and need no extra
+fits. On synthetic collapses they are close to their nominal coverage (see
+`test/scripts/bootstrap_coverage.jl`). A large ``|z_0|`` moves the levels towards 0 or 1,
+so such quantiles need correspondingly many replicates (``n \\gtrsim 1000``).
 
 Other intervals can be computed from the samples in `b.samples` (rows of replicates whose
 fit converged are marked in `b.converged`).
@@ -299,20 +301,20 @@ end
 Two-sided p-value of the hypothesis that the parameters `name` equal `value`.
 
 * `method=:bc` (default, no extra fits) tests one parameter and is the test dual to the
-  BC interval of [`confint`](@ref) (Efron, 1987): `p < 1 - level` exactly when `value`
-  lies outside the interval of that `level`, up to the resolution of the replicates. The
-  fractions of samples below and above `value`, with the `+1` correction (Davison &
-  Hinkley, 1997, see [`bootstrap`](@ref)), are mapped through `Φ(Φ⁻¹(P) ∓ 2z₀)`, and `p`
-  is twice the smaller one.
+  BC interval of [`confint`](@ref) (Efron, 1987): ``p < α`` exactly when `value` lies
+  outside the interval of `level` ``= 1 - α``, up to the resolution of the replicates.
+  The fractions ``P`` of samples below and above `value`, with the ``+1`` correction
+  (Davison & Hinkley, 1997, see [`bootstrap`](@ref)), are mapped through
+  ``Φ(Φ^{-1}(P) ∓ 2z_0)``, and ``p`` is twice the smaller one.
   On the side towards which the BC interval is stretched, the smallest attainable
-  p-value is `2Φ(Φ⁻¹(1/(n + 1)) + 2|z₀|)`: about 0.005 for `n = 1000` and `|z₀| = 0.15`,
-  but 0.06 for `|z₀| = 0.6`. To reject strongly off-centre cases, use more replicates or
-  `method=:null`.
+  p-value is ``2Φ(Φ^{-1}(1/(n + 1)) + 2|z_0|)``: about 0.005 for ``n = 1000`` and
+  ``|z_0| = 0.15``, but 0.06 for ``|z_0| = 0.6``. To reject strongly off-centre cases,
+  use more replicates or `method=:null`.
 * `method=:null` follows the first guideline of Hall & Wilson (1991) and resamples under
   the hypothesis. The parameters are refitted with `name` fixed at `value`; replicates
   are drawn from that constrained collapse, and each is fitted with and without the
   constraint. The p-value is the fraction of replicates whose cost increase from the
-  constraint is at least the observed one (again with the `+1` correction). It accepts
+  constraint is at least the observed one (again with the ``+1`` correction). It accepts
   several parameters at once and needs `2n` fits. The keyword arguments `n` (default:
   the number of replicates of `b`), `rng`, `parallel` and `progress` are as for
   [`bootstrap`](@ref).
