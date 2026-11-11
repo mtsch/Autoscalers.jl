@@ -14,15 +14,10 @@ Minimise the cost of `a` over its free parameters with Optim.jl, starting from `
 Returns a `NamedTuple` `(; params, cost, converged, result)`, where `result` is the last
 Optim result.
 
-By default this uses the Nelder–Mead simplex method (Nelder & Mead, 1965), with a small
-initial simplex around `x0`, and restarts it `restarts` times from the previous minimum,
-because a single run can stall in an elongated simplex. Any derivative-free Optim
-`method` and `options` can be passed instead.
-
-# References
-
-- J. A. Nelder and R. Mead, *A simplex method for function minimization*, Comput. J.
-  **7**, 308 (1965), [doi:10.1093/comjnl/7.4.308](https://doi.org/10.1093/comjnl/7.4.308).
+By default this uses the Nelder–Mead simplex method with a small initial simplex around
+`x0`, and restarts it `restarts` times from the previous minimum, because a single run can
+stall in an elongated simplex. Any derivative-free Optim `method` and `options` can be
+passed instead.
 """
 function fit_collapse(
     a::Autoscaler, x0;

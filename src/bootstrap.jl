@@ -1,49 +1,3 @@
-const REFERENCES_BOOTSTRAP = """
-- B. Efron and R. J. Tibshirani, *An Introduction to the Bootstrap*, Chapman & Hall
-  (1993), [doi:10.1201/9780429246593](https://doi.org/10.1201/9780429246593) (CRC
-  reprint).
-- A. C. Davison and D. V. Hinkley, *Bootstrap Methods and their Application*, Cambridge
-  University Press (1997),
-  [doi:10.1017/CBO9780511802843](https://doi.org/10.1017/CBO9780511802843).
-"""
-
-const REFERENCE_HALL_WILSON = """
-- P. Hall and S. R. Wilson, *Two guidelines for bootstrap hypothesis testing*, Biometrics
-  **47**, 757 (1991), [doi:10.2307/2532163](https://doi.org/10.2307/2532163).
-"""
-
-"""
-    with_data(a::Autoscaler, data)
-
-A copy of `a` that uses `data`, which must have the same columns and rows as `a.data`,
-and has its own buffers, so it can be evaluated concurrently with `a`.
-"""
-function with_data(a::Autoscaler, data)
-    n = length(a.sizes)
-    return Autoscaler(
-        a.ansatz, data, a.errors,
-        zeros(n), zeros(n), zeros(n),
-        a.sizes, a.avail_sizes, a.size_map,
-        Float64[], Float64[], Float64[],
-        copy(a.hardcodes), zeros(length(a.last_params)),
-        a.classic_cost_function, a.use_all_sizes, a.window_width,
-        a.eval_window, a.eval_mask, a.penalty,
-    )
-end
-
-"""
-    with_fixed(a::Autoscaler, fixed)
-
-A copy of `a` with the parameters in `fixed` (pairs `name => value`) hardcoded as well.
-"""
-function with_fixed(a::Autoscaler, fixed)
-    result = with_data(a, a.data)
-    for (name, value) in fixed
-        result.hardcodes[findfirst(==(name), a.ansatz.param_names)] = value
-    end
-    return result
-end
-
 """
     pooled_master_curve(a::Autoscaler)
 
@@ -66,6 +20,8 @@ function pooled_master_curve(a::Autoscaler)
     end
 end
 
+# Tags the duals that differentiate the ansatz with respect to the column being solved
+# for in `model_data`, so they cannot be confused with the error-propagation duals.
 struct ModelInversion end
 
 """
@@ -95,10 +51,10 @@ end
 """
     model_data(a::Autoscaler, params; maxiter=50)
 
-Data of the fitted collapse at the free parameters `params`: the first column with errors
-is replaced by the values whose scaled `y` lies exactly on the `pooled_master_curve`.
-The ansatz is inverted point by point with Newton's method, which takes one step when the
-scaled `y` is affine in that column.
+Data that lies exactly on the fitted collapse at the free parameters `params`. For each
+data point, the value in the first column with errors is replaced by the value whose
+scaled `y` equals the `pooled_master_curve` at that point. The ansatz is solved for it with
+Newton's method, which needs a single step when the scaled `y` is linear in that column.
 """
 function model_data(a::Autoscaler, params; maxiter=50)
     full = get_parameters(a, params)
@@ -217,7 +173,7 @@ end
 """
     bootstrap(
         a::Autoscaler, estimate;
-        n=1000, rng=Random.default_rng(), parallel=true, progress=true,
+        n=1000, rng=Random.default_rng(), parallel=true, progress=isinteractive(),
         method=NelderMead(...), options=Optim.Options(...),
     )
 
@@ -233,18 +189,23 @@ columns with errors), and refits the parameters with [`fit_collapse`](@ref), usi
 
 Replicates run on all Julia threads if `parallel` (start Julia with `--threads`), and
 are reproducible for a given `rng` regardless of the number of threads. `progress` shows
-a progress bar.
+a progress bar (by default in interactive sessions).
 
 The spread of the samples estimates the statistical error only. Systematic errors, for
 example from the choice of `eval_window` or corrections to scaling, are not included.
 
 # References
 
-$REFERENCES_BOOTSTRAP
+- B. Efron and R. J. Tibshirani, *An Introduction to the Bootstrap*, Chapman & Hall
+  (1993), [doi:10.1201/9780429246593](https://doi.org/10.1201/9780429246593) (CRC
+  reprint).
+- A. C. Davison and D. V. Hinkley, *Bootstrap Methods and their Application*, Cambridge
+  University Press (1997),
+  [doi:10.1017/CBO9780511802843](https://doi.org/10.1017/CBO9780511802843).
 """
 function bootstrap(
     a::Autoscaler, estimate;
-    n=1000, rng=Random.default_rng(), parallel=true, progress=true,
+    n=1000, rng=Random.default_rng(), parallel=true, progress=isinteractive(),
     method=default_fit_method(), options=default_fit_options(),
 )
     n ≥ 1 || throw(ArgumentError("`n` must be positive"))
@@ -258,7 +219,7 @@ function bootstrap(
     # Not a BitVector: its bits share words, so concurrent writes from threads would race.
     converged = fill(false, n)
     replicate!(n; rng, parallel, progress, desc="Bootstrap: ") do i, rng_i
-        s = with_data(a, synthetic_data(rng_i, model, a))
+        s = Autoscaler(a; data=synthetic_data(rng_i, model, a))
         result = fit_collapse(s, estimate; method, options)
         samples[i, :] .= result.params
         converged[i] = result.converged
@@ -274,13 +235,9 @@ end
 """
     confint(b::BootstrapResult; level=0.95)
 
-Bootstrap percentile confidence intervals (Efron & Tibshirani, 1993) of every free
-parameter, as a `NamedTuple` of `(lower, upper)`. Percentile intervals follow the shape
-of the bootstrap distribution, so they can be asymmetric around the estimate.
-
-# References
-
-$REFERENCES_BOOTSTRAP
+Bootstrap percentile confidence intervals of every free parameter, as a `NamedTuple` of
+`(lower, upper)`. Percentile intervals follow the shape of the bootstrap distribution, so
+they can be asymmetric around the estimate.
 """
 function StatsAPI.confint(b::BootstrapResult; level=0.95)
     0 < level < 1 || throw(ArgumentError("`level` must be in (0, 1)"))
@@ -294,13 +251,8 @@ end
 """
     stderror(b::BootstrapResult)
 
-Bootstrap standard errors (Efron & Tibshirani, 1993) of every free parameter, as a
-`NamedTuple`: the standard deviation of the samples. For asymmetric errors, prefer
-[`confint`](@ref).
-
-# References
-
-$REFERENCES_BOOTSTRAP
+Bootstrap standard errors of every free parameter, as a `NamedTuple`: the standard
+deviation of the samples. For asymmetric errors, prefer [`confint`](@ref).
 """
 function StatsAPI.stderror(b::BootstrapResult)
     return NamedTuple{b.param_names}(Tuple(std.(eachcol(converged_samples(b)))))
@@ -313,9 +265,9 @@ Two-sided p-value of the hypothesis that the parameters `name` equal `value`.
 
 * `method=:percentile` (default, no extra fits) tests one parameter against its
   bootstrap distribution: `p = 2 min(P(θ* ≤ value), P(θ* ≥ value))`, with the `+1`
-  correction of Davison & Hinkley (1997) so that `p ≥ 2/(n + 1)`. It is the test dual to
-  the percentile interval of [`confint`](@ref): `p < 1 - level` exactly when `value` lies
-  outside the interval of that `level`.
+  correction (Davison & Hinkley, 1997, see [`bootstrap`](@ref)) so that
+  `p ≥ 2/(n + 1)`. It is the test dual to the percentile interval of [`confint`](@ref):
+  `p < 1 - level` exactly when `value` lies outside the interval of that `level`.
 * `method=:null` follows the first guideline of Hall & Wilson (1991) and resamples under
   the hypothesis. The parameters are refitted with `name` fixed at `value`; replicates
   are drawn from that constrained collapse, and each is fitted with and without the
@@ -327,7 +279,8 @@ Two-sided p-value of the hypothesis that the parameters `name` equal `value`.
 
 # References
 
-$REFERENCES_BOOTSTRAP$REFERENCE_HALL_WILSON
+- P. Hall and S. R. Wilson, *Two guidelines for bootstrap hypothesis testing*, Biometrics
+  **47**, 757 (1991), [doi:10.2307/2532163](https://doi.org/10.2307/2532163).
 """
 function StatsAPI.pvalue(
     b::BootstrapResult, hypotheses::Pair{Symbol,<:Real}...; method=:percentile, kwargs...
@@ -365,11 +318,12 @@ end
 
 function null_pvalue(
     b::BootstrapResult, hypotheses;
-    n=length(b.converged), rng=Random.default_rng(), parallel=true, progress=true,
+    n=length(b.converged), rng=Random.default_rng(), parallel=true,
+    progress=isinteractive(),
 )
     n ≥ 1 || throw(ArgumentError("`n` must be positive"))
     a = b.autoscaler
-    constrained = with_fixed(a, hypotheses)
+    constrained = Autoscaler(a; fix=(; hypotheses...))
     fixed_names = first.(hypotheses)
     free = [i for (i, name) in enumerate(b.param_names) if name ∉ fixed_names]
     fit = fit_collapse(constrained, b.estimate[free]; b.method, b.options)
@@ -390,8 +344,8 @@ function null_pvalue(
     statistics = fill(NaN, n)
     replicate!(n; rng, parallel, progress, desc="Bootstrap test: ") do i, rng_i
         data = synthetic_data(rng_i, model, a)
-        free_fit = fit_collapse(with_data(a, data), start; b.method, b.options)
-        null_data = with_data(constrained, data)
+        free_fit = fit_collapse(Autoscaler(a; data), start; b.method, b.options)
+        null_data = Autoscaler(constrained; data)
         null_fit = fit_collapse(null_data, fit.params; b.method, b.options)
         if free_fit.converged && null_fit.converged
             statistics[i] = null_fit.cost - free_fit.cost

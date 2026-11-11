@@ -205,6 +205,35 @@ function hardcode_params!(a::Autoscaler, fix::NamedTuple)
     return a
 end
 
+"""
+    Autoscaler(a::Autoscaler; data=a.data, fix=(;))
+
+A copy of `a` with its own buffers, so it can be evaluated concurrently with `a`. `data`
+replaces the data columns; it must have the same columns and rows as `a.data`, in the same
+order. The parameters in `fix` are held fixed in addition to those already fixed in `a`.
+"""
+function Autoscaler(a::Autoscaler; data=a.data, fix=(;))
+    for k in keys(fix)
+        if k ∉ a.ansatz.param_names
+            throw(ArgumentError("`$k` in `fix` is not a parameter"))
+        end
+    end
+    n = length(a.sizes)
+    result = Autoscaler(
+        a.ansatz, data, a.errors,
+        zeros(n), zeros(n), zeros(n),
+        a.sizes, a.avail_sizes, a.size_map,
+        Float64[], Float64[], Float64[],
+        copy(a.hardcodes), zeros(length(a.last_params)),
+        a.classic_cost_function, a.use_all_sizes, a.window_width,
+        a.eval_window, a.eval_mask, a.penalty,
+    )
+    for (name, value) in pairs(fix)
+        result.hardcodes[findfirst(==(name), a.ansatz.param_names)] = value
+    end
+    return result
+end
+
 Base.show(io::IO, a::Autoscaler) = print(io, "Autoscaler(", a.ansatz, ")")
 
 """

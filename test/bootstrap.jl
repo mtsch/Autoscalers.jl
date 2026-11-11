@@ -27,7 +27,7 @@
             model = Autoscalers.model_data(s, q)
             transform!(s, q)
             target = Autoscalers.pooled_master_curve(s)
-            m = Autoscalers.with_data(s, model)
+            m = Autoscaler(s; data=model)
             transform!(m, q)
             @test maximum(abs.(m.y_val_scaled .- target) ./ m.y_err_scaled) < 1e-8
             # only the first column with errors is replaced
@@ -41,7 +41,7 @@
         model = Autoscalers.model_data(s, p)
         transform!(s, p)
         target = Autoscalers.pooled_master_curve(s)
-        m = Autoscalers.with_data(s, model)
+        m = Autoscaler(s; data=model)
         transform!(m, p)
         @test maximum(abs.(m.y_val_scaled .- target) ./ m.y_err_scaled) < 1e-3
 
@@ -50,6 +50,17 @@
         end
         s = Autoscaler(exact, flat)
         @test_throws ArgumentError Autoscalers.model_data(s, [1.0])
+    end
+
+    @testset "copies of an Autoscaler" begin
+        s = Autoscaler(exact; window...)
+        c = Autoscaler(s; fix=(; b=0.25))
+        @test Autoscalers.free_parameter_names(c) == (:a, :x_c)
+        @test c(1.0, 0.3) == s(1.0, 0.25, 0.3)
+        @test c.x_val_scaled !== s.x_val_scaled
+        shifted = Autoscaler(s; data=(; s.data..., y=s.data.y .+ 1))
+        @test shifted.data.y == s.data.y .+ 1
+        @test_throws ArgumentError Autoscaler(s; fix=(; c=1.0))
     end
 
     noisy = synthetic(g; sizes=[8, 16, 32], xs=range(0.2, 0.4; length=41), σ=2e-3,
