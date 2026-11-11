@@ -151,8 +151,10 @@
         # resampling under the hypothesis
         kw = (; method=:null, n=20, rng=Xoshiro(3), progress=false)
         @test pvalue(b, :a => estimate[1]; kw...) > 0.05
-        @test pvalue(b, :a => 1.3; kw...) ≈ 1 / 21
-        @test pvalue(b, :a => 1.3, :b => 0.5; kw...) ≈ 1 / 21
+        # forcing a far-off value pulls the curves apart: one warning, not one per refit
+        far = r"bootstrap test replicates \(and the fit under the hypothesis\) extrapolate"
+        @test (@test_logs (:warn, far) pvalue(b, :a => 1.3; kw...)) ≈ 1 / 21
+        @test (@test_logs (:warn, far) pvalue(b, :a => 1.3, :b => 0.5; kw...)) ≈ 1 / 21
 
         @test_throws ArgumentError pvalue(b)
         @test_throws ArgumentError pvalue(b, :c => 1.0)
@@ -177,5 +179,35 @@
         )
         kw = (; method=:null, n=2, progress=false)
         @test_throws ArgumentError pvalue(stuck, :a => 1.3; kw...)
+    end
+
+    @testset "extrapolation warning" begin
+        # inside the range all sizes cover: no warning
+        @test_logs fit_collapse(s, estimate)
+        @test !Autoscalers.extrapolates(s, estimate)
+        classic = Autoscaler(noisy; classic_cost_function=true)
+        @test !Autoscalers.extrapolates(classic, estimate)
+
+        # beyond it: one warning, which suggests a window that needs no extrapolation
+        wide = Autoscaler(noisy; eval_window=(0.22, 0.38))
+        fit = @test_logs (:warn, r"extrapolates curves .* would need none") fit_collapse(
+            wide, estimate
+        )
+        @test Autoscalers.extrapolates(wide, fit.params)
+        _, suggested = Autoscalers.extrapolation_free_window(
+            wide, Autoscalers.get_parameters(wide, fit.params)
+        )
+        @test 0.22 ≤ suggested[1] < 0.3 < suggested[2] ≤ 0.38
+        inside = Autoscaler(noisy; eval_window=suggested)
+        @test cost_breakdown(inside, fit.params).penalty == 0
+
+        # the bootstrap and its test warn once for all refits, not once per refit
+        kw = (; rng=Xoshiro(5), progress=false)
+        bw = @test_logs (:warn, r"4 of 4 bootstrap fits extrapolate") bootstrap(
+            wide, fit.params; n=4, kw...
+        )
+        @test_logs (:warn, r"of 3 bootstrap test replicates") pvalue(
+            bw, :a => fit.params[1]; method=:null, n=3, kw...
+        )
     end
 end

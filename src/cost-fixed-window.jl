@@ -84,3 +84,62 @@ function cost_breakdown(a::Autoscaler, args::Union{AbstractVector,Tuple})
     return fixed_window_breakdown(a, get_parameters!(a, args))
 end
 cost_breakdown(a::Autoscaler, args::Vararg{Real}) = cost_breakdown(a, args)
+
+"""
+    extrapolates(a::Autoscaler, args)
+
+Whether the fixed-window cost at the free parameters `args` relies on extrapolating curves
+beyond their data, i.e. has a non-zero penalty. Always `false` for the classic cost.
+"""
+function extrapolates(a::Autoscaler, args)
+    return !isnothing(a.eval_window) && cost_breakdown(a, args).penalty > 0
+end
+
+"""
+    extrapolation_free_window(a::Autoscaler, params)
+
+At the full parameters `params`, the number of scored points that need extrapolation, and
+the widest part of `eval_window` around its centre in which no point does (or `nothing`).
+A point needs extrapolation when its scaled `x` lies outside the data of another curve.
+"""
+function extrapolation_free_window(a::Autoscaler, params)
+    transform!(a, params)
+    covered = map(eachindex(a.x_val_scaled)) do i
+        x = a.x_val_scaled[i]
+        return all(1:n_curves(a)) do c
+            xs = scaled_data(a, c).x_val
+            return c == a.curve[i] || xs[1] ≤ x ≤ xs[end]
+        end
+    end
+    n_extrapolated = count(.!covered .& a.eval_mask)
+    # Rows that share an unscaled `x` are kept or dropped together by a window.
+    candidates = sort!(unique(raw_x(a)[a.eval_mask]))
+    bad = Set(raw_x(a)[.!covered])
+    centre = sum(a.eval_window) / 2
+    k = argmin(abs.(candidates .- centre))
+    if candidates[k] in bad
+        return n_extrapolated, nothing
+    end
+    lo = hi = k
+    while lo > 1 && candidates[lo - 1] ∉ bad
+        lo -= 1
+    end
+    while hi < length(candidates) && candidates[hi + 1] ∉ bad
+        hi += 1
+    end
+    return n_extrapolated, (candidates[lo], candidates[hi])
+end
+
+function warn_extrapolation(a::Autoscaler, args)
+    extrapolates(a, args) || return nothing
+    n, window = extrapolation_free_window(a, get_parameters(a, args))
+    if isnothing(window)
+        suggestion = "no part of `eval_window` around its centre is free of it"
+    else
+        suggestion = "`eval_window=$window` would need none"
+    end
+    @warn "The fitted collapse extrapolates curves beyond their data at $n of " *
+          "$(count(a.eval_mask)) scored points, so its cost includes the extrapolation " *
+          "penalty; $suggestion."
+    return nothing
+end
