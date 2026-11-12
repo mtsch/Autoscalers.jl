@@ -85,8 +85,10 @@ const ALL = (; eval_window=(-Inf, Inf))
         @test dy1 ≈ dy0 atol = 1e-8
         @test d ≤ 1e-9
     end
-    @test all(extrapolate(xs, ys, es, 3.0) .≈ (7.0, 0.09, 0.5))   # slope 3, d = 1/2
-    @test all(extrapolate(xs, ys, es, -1.0) .≈ (-1.0, 0.01, 0.5))
+    @test all(extrapolate(xs, ys, es, 3.0) .≈ (7.0, 0.40, 0.5))   # (1+1)²0.3² + 1²0.2²
+    @test all(extrapolate(xs, ys, es, -1.0) .≈ (-1.0, 0.08, 0.5))
+    # the propagated variance grows quadratically: (1 + s)² σₙ² + s² σₙ₋₁²
+    @test extrapolate(xs, ys, es, 4.0)[2] ≈ 3^2 * 0.09 + 2^2 * 0.04
     @test_throws ArgumentError extrapolate([0.0], [0.0], [1.0], 0.0)
 end
 
@@ -473,7 +475,20 @@ end
     b = cost_breakdown(s, 1.0, 0.0, 0.5)
     @test b.cost ≈ b.chi2 + b.penalty
     @test b.penalty == 0
+    @test b.log_variance == 0
     @test b.cost == s(1.0, 0.0, 0.5)
+
+    # the log-variance term of the likelihood: positive, part of the cost, kept by copies
+    s = Autoscaler(data; eval_window=(0.4, 0.6), log_likelihood=true)
+    b = cost_breakdown(s, 1.0, 0.0, 0.5)
+    @test b.log_variance > 0
+    @test b.cost ≈ b.chi2 + b.penalty + b.log_variance
+    plain = Autoscaler(data; eval_window=(0.4, 0.6))
+    @test b.chi2 == cost_breakdown(plain, 1.0, 0.0, 0.5).chi2
+    @test Autoscaler(s; fix=(; b=0.0))(1.0, 0.5) == s(1.0, 0.0, 0.5)
+    @test_throws ArgumentError Autoscaler(
+        data; classic_cost_function=true, log_likelihood=true
+    )
 end
 
 ###
@@ -702,6 +717,26 @@ end
     n_before = count(s.eval_mask)
     s(2.0, 0.5, 0.2)
     @test count(s.eval_mask) == n_before
+
+    # Without a penalty, extrapolated curves carry a growing variance, which lowers the χ²;
+    # the log-variance term of the likelihood keeps absurd parameters from being rewarded.
+    nll = Autoscaler(data; eval_window=(xc0 - 0.03, xc0 + 0.03), penalty=0,
+                     log_likelihood=true)
+    @test nll(2.5, b0, xc0) > nll(a0, b0, xc0)
+    @test nll(a0, b0, xc0 + 1.0) > nll(a0, b0, xc0)
+end
+
+@testset "a wide window without penalty" begin
+    # Twice the range all sizes cover after scaling: about a third of the scored points
+    # need extrapolation. Without a penalty, the propagated extrapolation variance gives
+    # unbiased estimates; the penalty pulls them away from the truth.
+    g(L, x) = L^-0.25 * (1 + tanh(L * (x - 0.3)) + 0.3 * L * (x - 0.3))
+    data = synthetic(g; sizes=[8, 16, 32], xs=0.2:0.005:0.4, σ=2e-3, rng=Xoshiro(1))
+    for kw in ((; penalty=0), (; penalty=0, log_likelihood=true))
+        s = Autoscaler(data; eval_window=(0.25, 0.35), kw...)
+        p = @test_logs (:warn, r"extrapolates") fit_collapse(s, [1.1, 0.2, 0.31]).params
+        @test p ≈ [1.0, 0.25, 0.3] atol = 0.015
+    end
 end
 
 include("autoscale_reference.jl")
