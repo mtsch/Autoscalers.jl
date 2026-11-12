@@ -141,8 +141,8 @@ end
 function warn_extrapolated_replicates(k, n, what; hypothesis=false)
     k > 0 || hypothesis || return nothing
     also = hypothesis ? " (and the fit under the hypothesis)" : ""
-    @warn "$k of $n $what$also extrapolate curves beyond their data, so their cost " *
-          "includes the extrapolation penalty; consider shrinking `eval_window`."
+    @warn "$k of $n $what$also extrapolate curves beyond their data; consider " *
+          "shrinking `eval_window`."
     return nothing
 end
 

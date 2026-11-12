@@ -66,8 +66,11 @@ end
 Like `interpolate(xs, ys, dys, x; sq_errs=true)`, but defined everywhere. Returns
 `(y, dy2, d)`. Outside the data:
 
-* `y` continues linearly from the end segment;
-* `dy2` is held at its value at the end;
+* `y` continues linearly through the two end points: ``y = (1 + s) y_n - s y_{n-1}``,
+  with ``s`` the distance beyond the end in units of the end segment;
+* `dy2` is the propagated variance of that line,
+  ``(1 + s)^2 σ_n^2 + s^2 σ_{n-1}^2``, so it grows with the distance and is continuous at
+  the end;
 * `d` is the distance outside the data range, in units of the range width (`0` inside).
 
 ```jldoctest
@@ -76,8 +79,8 @@ julia> xs, ys, dys = [0.0, 1.0, 2.0], [0.0, 10.0, 20.0], [1.0, 1.0, 3.0];
 julia> Autoscalers.extrapolate(xs, ys, dys, 1.5)
 (15.0, 5.0, 0.0)
 
-julia> Autoscalers.extrapolate(xs, ys, dys, 3.0)  # half a range width beyond the end
-(30.0, 9.0, 0.5)
+julia> Autoscalers.extrapolate(xs, ys, dys, 3.0)  # (1 + 1)² 3² + 1² 1² = 37
+(30.0, 37.0, 0.5)
 ```
 """
 function extrapolate(xs, ys, dys, x)
@@ -86,10 +89,12 @@ function extrapolate(xs, ys, dys, x)
     width = xs[end] - xs[1]
     if x < xs[1]
         y = lerp((xs[1], ys[1]), (xs[2], ys[2]), x)
-        return y, dys[1]^2, (xs[1] - x) / width
+        s = (xs[1] - x) / (xs[2] - xs[1])
+        return y, (1 + s)^2 * dys[1]^2 + s^2 * dys[2]^2, (xs[1] - x) / width
     elseif x > xs[end]
         y = lerp((xs[n-1], ys[n-1]), (xs[n], ys[n]), x)
-        return y, dys[n]^2, (x - xs[end]) / width
+        s = (x - xs[n]) / (xs[n] - xs[n-1])
+        return y, (1 + s)^2 * dys[n]^2 + s^2 * dys[n-1]^2, (x - xs[end]) / width
     else
         y, dy2 = interpolate(xs, ys, dys, x; sq_errs=true)
         return y, dy2, 0.0

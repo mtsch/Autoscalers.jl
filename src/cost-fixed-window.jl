@@ -1,7 +1,9 @@
 # Fixed-window cost function: a fixed set of points, chosen in raw `x`, is compared to the
 # master curve of the other curves. Extrapolation beyond a curve's data is penalised
 # smoothly, so the cost is continuous in the parameters and cannot be lowered by moving the
-# window.
+# window. Extrapolated curves carry the propagated, growing variance of the extrapolation,
+# which on its own would reward extrapolating further; the penalty or the log-variance term
+# of the likelihood (`log_likelihood=true`) counters that.
 
 """
     fixed_master_curve(a::Autoscaler, x, own_curve)
@@ -26,33 +28,41 @@ end
 """
     fixed_window_breakdown(a::Autoscaler, params)
 
-Fixed-window cost, split into the collapse (χ²-like) part and the extrapolation penalty.
-Each curve contributes the mean over its scored points; the result is averaged over curves
-with at least one scored point.
+Fixed-window cost, split into the collapse (χ²-like) part, the extrapolation penalty and,
+with `a.log_likelihood`, the log-variance term of the Gaussian likelihood. Each curve
+contributes the mean over its scored points; the result is averaged over curves with at
+least one scored point.
 """
 function fixed_window_breakdown(a::Autoscaler, params)
     transform!(a, params)
-    chi2_total = pen_total = 0.0
+    chi2_total = pen_total = logvar_total = 0.0
     n_scored = 0
     for (c, range) in enumerate(a.curve_ranges)
-        chi2 = pen = 0.0
+        chi2 = pen = logvar = 0.0
         n = 0
         for i in range
             a.eval_mask[i] || continue
             m = fixed_master_curve(a, a.x_val_scaled[i], c)
-            chi2 += (a.y_val_scaled[i] - m.Y)^2 / (a.y_err_scaled[i]^2 + m.dY2)
+            σ2 = a.y_err_scaled[i]^2
+            chi2 += (a.y_val_scaled[i] - m.Y)^2 / (σ2 + m.dY2)
             pen += m.penalty
+            # log(σ² + σ_Y²) up to the constant log σ², which does not depend on the
+            # parameters: zero for an exact master curve.
+            logvar += log1p(m.dY2 / σ2)
             n += 1
         end
         n == 0 && continue
         chi2_total += chi2 / n
         pen_total += pen / n
+        logvar_total += logvar / n
         n_scored += 1
     end
+    logvar = a.log_likelihood ? logvar_total / n_scored : 0.0
     return (;
-        cost=(chi2_total + pen_total) / n_scored,
+        cost=(chi2_total + pen_total) / n_scored + logvar,
         chi2=chi2_total / n_scored,
         penalty=pen_total / n_scored,
+        log_variance=logvar,
     )
 end
 
@@ -62,10 +72,15 @@ fixed_window_cost(a::Autoscaler, params) = fixed_window_breakdown(a, params).cos
     cost_breakdown(a::Autoscaler, args...)
 
 The fixed-window cost at the free parameters `args`, split into its parts: a `NamedTuple`
-`(; cost, chi2, penalty)` with `cost = chi2 + penalty`. Requires `eval_window`.
+`(; cost, chi2, penalty, log_variance)` with `cost = chi2 + penalty + log_variance`.
+Requires `eval_window`.
 
-A non-negligible `penalty` means the collapse relies on extrapolating curves beyond their
-data; shrink `eval_window` until it vanishes.
+* `chi2` is the χ² per scored point, a measure of goodness of fit also when the cost is a
+  likelihood.
+* A non-negligible `penalty` means the collapse relies on extrapolating curves beyond their
+  data; shrink `eval_window` until it vanishes.
+* `log_variance` is the mean of ``\\log(1 + σ_Y^2/σ^2)`` over the scored points with
+  `log_likelihood=true`, and zero otherwise.
 
 # Examples
 
@@ -76,7 +91,7 @@ julia> data = [(; L, x, y=L^-0.25 * tanh(L * (x - 0.3)), y_err=1e-3)
 julia> s = Autoscaler(data; eval_window=(0.28, 0.32));
 
 julia> map(c -> round(c; digits=3), cost_breakdown(s, 1.0, 0.25, 0.3))
-(cost = 0.005, chi2 = 0.005, penalty = 0.0)
+(cost = 0.005, chi2 = 0.005, penalty = 0.0, log_variance = 0.0)
 ```
 """
 function cost_breakdown(a::Autoscaler, args::Union{AbstractVector,Tuple})
@@ -89,10 +104,11 @@ cost_breakdown(a::Autoscaler, args::Vararg{Real}) = cost_breakdown(a, args)
     extrapolates(a::Autoscaler, args)
 
 Whether the fixed-window cost at the free parameters `args` relies on extrapolating curves
-beyond their data, i.e. has a non-zero penalty. Always `false` for the classic cost.
+beyond their data, whatever the penalty. Always `false` for the classic cost.
 """
 function extrapolates(a::Autoscaler, args)
-    return !isnothing(a.eval_window) && cost_breakdown(a, args).penalty > 0
+    isnothing(a.eval_window) && return false
+    return first(extrapolation_free_window(a, get_parameters(a, args))) > 0
 end
 
 """
@@ -139,7 +155,6 @@ function warn_extrapolation(a::Autoscaler, args)
         suggestion = "`eval_window=$window` would need none"
     end
     @warn "The fitted collapse extrapolates curves beyond their data at $n of " *
-          "$(count(a.eval_mask)) scored points, so its cost includes the extrapolation " *
-          "penalty; $suggestion."
+          "$(count(a.eval_mask)) scored points; $suggestion."
     return nothing
 end

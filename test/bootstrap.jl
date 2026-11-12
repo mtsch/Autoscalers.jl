@@ -190,6 +190,10 @@
         classic = Autoscaler(noisy; classic_cost_function=true)
         @test !Autoscalers.extrapolates(classic, estimate)
 
+        # also without a penalty, extrapolation is detected
+        no_penalty = Autoscaler(noisy; eval_window=(0.22, 0.38), penalty=0)
+        @test Autoscalers.extrapolates(no_penalty, estimate)
+
         # beyond it: one warning, which suggests a window that needs no extrapolation
         wide = Autoscaler(noisy; eval_window=(0.22, 0.38))
         fit = @test_logs (:warn, r"extrapolates curves .* would need none") fit_collapse(

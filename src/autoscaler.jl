@@ -3,6 +3,7 @@
         table, ansatz::Ansatz=DEFAULT_ANSATZ;
         eval_window=nothing,
         penalty=100.0,
+        log_likelihood=false,
         classic_cost_function=false,
         use_all_sizes=false,
         fix=(;),
@@ -24,9 +25,14 @@ functions must be chosen:
 * **Fixed window** (`eval_window = (lo, hi)`): only points with
   ``\\mathrm{lo} ≤ x ≤ \\mathrm{hi}`` in the *unscaled* ``x`` are scored, so the scored set
   does not change with the parameters. Points outside it still serve for interpolation.
-  Where another curve does not reach a point's scaled ``x``, it is extrapolated linearly
-  and `penalty` ``× d^2`` is added, with ``d`` the distance outside in units of that
-  curve's scaled range.
+  Where another curve does not reach a point's scaled ``x``, it is extrapolated linearly,
+  with the propagated variance of that extrapolation, which grows with the distance. Since
+  larger master-curve errors lower the χ², a penalty `penalty` ``× d^2`` is added, with
+  ``d`` the distance outside in units of that curve's scaled range. With
+  `log_likelihood=true` the cost is instead (up to a constant) the Gaussian negative
+  log-likelihood per point, ``χ^2 + \\log(1 + σ_Y^2/σ^2)``, whose log term charges for
+  larger errors without a tuning parameter; set `penalty=0` to use it alone. Its value is
+  then not a χ²; [`cost_breakdown`](@ref) reports the χ² part.
 * **Classic** (`classic_cost_function=true`): the cost of Houdayer & Hartmann (2004), with
   a local linear fit through the neighbouring points of the other curves. It scores every
   point where the curves overlap in the *scaled* ``x``, so for the smallest sizes it
@@ -65,7 +71,7 @@ julia> round(s(1.0, 0.25, 0.3); digits=3)  # a, b, x_c: a good collapse
 0.005
 
 julia> round(s(1.2, 0.25, 0.3); digits=1)  # a bad one
-270.2
+217.6
 
 julia> s_b = Autoscaler(data; eval_window=(0.28, 0.32), fix=(; b=0.25));
 
@@ -111,6 +117,7 @@ struct Autoscaler{P,A<:Ansatz{P},D<:NamedTuple,E<:NamedTuple}
     eval_window::Union{Nothing,Tuple{Float64,Float64}}
     eval_mask::BitVector
     penalty::Float64
+    log_likelihood::Bool
 end
 
 function Autoscaler(
@@ -119,6 +126,7 @@ function Autoscaler(
     use_all_sizes=false,
     eval_window=nothing,
     penalty=100.0,
+    log_likelihood=false,
     fix=(;),
 )
     if !(fix isa NamedTuple)
@@ -133,6 +141,9 @@ function Autoscaler(
         ))
         use_all_sizes && throw(ArgumentError(
             "`use_all_sizes` applies to the fixed-window cost only"
+        ))
+        log_likelihood && throw(ArgumentError(
+            "`log_likelihood` applies to the fixed-window cost only"
         ))
     elseif isnothing(eval_window)
         throw(ArgumentError(
@@ -259,7 +270,7 @@ function Autoscaler(
         Float64[], Float64[], Float64[],
         fill(NaN, n_params), zeros(n_params),
         classic_cost_function, use_all_sizes,
-        ew, eval_mask, Float64(penalty),
+        ew, eval_mask, Float64(penalty), Bool(log_likelihood),
     )
     return hardcode_params!(result, fix)
 end
@@ -308,7 +319,7 @@ function Autoscaler(a::Autoscaler; data=a.data, fix=(;))
         Float64[], Float64[], Float64[],
         copy(a.hardcodes), zeros(length(a.last_params)),
         a.classic_cost_function, a.use_all_sizes,
-        a.eval_window, a.eval_mask, a.penalty,
+        a.eval_window, a.eval_mask, a.penalty, a.log_likelihood,
     )
     for (name, value) in pairs(fix)
         result.hardcodes[findfirst(==(name), a.ansatz.param_names)] = value
