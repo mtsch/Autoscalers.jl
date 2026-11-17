@@ -2,48 +2,11 @@
 # curve of the other curves is integrated over the part of `eval_window` (in unscaled x)
 # that the curve's own data cover, and normalised by the length of that part.
 
-"""
-    interpolate_variance(xs, ys, dys, x, exact)
-
-Like `extrapolate`, but between knots the variance is either interpolated linearly in σ²
-(`exact=false`) or is the variance of the linear interpolant of independent points,
-``(1-w)^2 σ_1^2 + w^2 σ_2^2`` (`exact=true`). Outside the data it is `extrapolate`.
-"""
-function interpolate_variance(xs, ys, dys, x, exact)
-    if !exact || x < xs[1] || x > xs[end]
-        return extrapolate(xs, ys, dys, x)
-    end
-    k = searchsortedlast(xs, x)
-    k == length(xs) && return ys[k], dys[k]^2, 0.0
-    w = (x - xs[k]) / (xs[k + 1] - xs[k])
-    y = (1 - w) * ys[k] + w * ys[k + 1]
-    return y, (1 - w)^2 * dys[k]^2 + w^2 * dys[k + 1]^2, 0.0
-end
-
 # Integrand at scaled `x` for curve `c`: (χ² density, penalty density).
 function integrand(a::Autoscaler, c, x, exact)
-    num = den = pen = 0.0
-    for c′ in 1:n_curves(a)
-        c′ == c && continue
-        xs, ys, dys = scaled_data(a, c′)
-        y, dy2, d = interpolate_variance(xs, ys, dys, x, exact)
-        num += y / dy2
-        den += 1 / dy2
-        pen += a.penalty * d^2
-    end
-    xs, ys, dys = scaled_data(a, c)
-    y, dy2, _ = interpolate_variance(xs, ys, dys, x, exact)
-    return (y - num / den)^2 / (dy2 + 1 / den), pen
-end
-
-# Scaled x at unscaled `t` on curve `c`, interpolated between the curve's own points (exact
-# when the scaling map is affine in t, as for L^a (t - t_c)).
-function scaled_at(a::Autoscaler, c, t)
-    range = a.curve_ranges[c]
-    ts = view(raw_x(a), range)
-    xs = view(a.x_val_scaled, range)
-    k = clamp(searchsortedlast(ts, t), 1, length(ts) - 1)
-    return lerp((ts[k], xs[k]), (ts[k + 1], xs[k + 1]), t)
+    m = fixed_master_curve(a, x, c; exact)
+    y, dy2, _ = extrapolate(scaled_data(a, c)..., x; exact)
+    return (y - m.Y)^2 / (dy2 + m.dY2), m.penalty
 end
 
 function integral_window_breakdown(a::Autoscaler, params)
@@ -57,7 +20,10 @@ function integral_window_breakdown(a::Autoscaler, params)
         ts = view(raw_x(a), range)
         t1, t2 = max(lo, ts[1]), min(hi, ts[end])
         t2 > t1 || continue
-        x1, x2 = scaled_at(a, c, t1), scaled_at(a, c, t2)
+        # The edges lie within the curve's data, so this never extrapolates. It is exact
+        # when the scaling map is affine in t, as for L^a (t - t_c).
+        xs = view(a.x_val_scaled, range)
+        x1, x2 = interpolate(ts, xs, t1), interpolate(ts, xs, t2)
         empty!(knots)
         push!(knots, x1, x2)
         for x in a.x_val_scaled

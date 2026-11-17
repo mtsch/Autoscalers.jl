@@ -17,11 +17,14 @@ function lerp((x1, y1), (x2, y2), selected_x)
 end
 
 """
-    interpolate(x, y, y_err, selected_x; sq_errs=false)
+    interpolate(x, y, y_err, selected_x; sq_errs=false, exact=false)
+    interpolate(x, y, selected_x)
 
 Linearly interpolate `y` and `y_err` between the knots `x` at `selected_x`. With
-`sq_errs=true`, the squared errors are interpolated and returned instead. Returns
-`(y, y_err)`, or `missing` outside the range of `x`.
+`sq_errs=true`, the squared errors are interpolated and returned instead. With
+`exact=true` (which implies `sq_errs`), the variance of the interpolant of independent
+points, ``(1 - λ)^2 σ_1^2 + λ^2 σ_2^2``, is returned instead. Returns `(y, y_err)`, or
+`missing` outside the range of `x`. Without `y_err`, returns only the interpolated `y`.
 
 ```jldoctest
 julia> x, y, y_err = [0.0, 1.0, 2.0], [0.0, 10.0, 20.0], [1.0, 1.0, 3.0];
@@ -32,16 +35,19 @@ julia> Autoscalers.interpolate(x, y, y_err, 1.5)
 julia> Autoscalers.interpolate(x, y, y_err, 1.5; sq_errs=true)  # mean of 1² and 3²
 (15.0, 5.0)
 
+julia> Autoscalers.interpolate(x, y, y_err, 1.5; exact=true)  # (1² + 3²) / 4
+(15.0, 2.5)
+
 julia> Autoscalers.interpolate(x, y, y_err, 3.0)
 missing
 ```
 """
-function interpolate(x, y, y_err, selected_x; sq_errs=false)
+function interpolate(x, y, y_err, selected_x; sq_errs=false, exact=false)
     indices = searchsorted(x, selected_x)
     if indices.start ≤ indices.stop
         # exact hit on a knot
         e = y_err[indices.start]
-        return y[indices.start], sq_errs ? e^2 : e
+        return y[indices.start], (sq_errs || exact) ? e^2 : e
     elseif indices.start > length(x) || indices.stop ≤ 0
         return missing
     else
@@ -49,21 +55,23 @@ function interpolate(x, y, y_err, selected_x; sq_errs=false)
         left = indices.stop
         right = indices.start
         e1, e2 = y_err[left], y_err[right]
-        if sq_errs
-            e1 *= e1
-            e2 *= e2
+        value = lerp((x[left], y[left]), (x[right], y[right]), selected_x)
+        if exact
+            λ = (selected_x - x[left]) / (x[right] - x[left])
+            return value, (1 - λ)^2 * e1^2 + λ^2 * e2^2
+        elseif sq_errs
+            return value, lerp((x[left], e1^2), (x[right], e2^2), selected_x)
+        else
+            return value, lerp((x[left], e1), (x[right], e2), selected_x)
         end
-        return (
-            lerp((x[left], y[left]), (x[right], y[right]), selected_x),
-            lerp((x[left], e1), (x[right], e2), selected_x),
-        )
     end
 end
+interpolate(x, y, selected_x) = first(interpolate(x, y, y, selected_x))
 
 """
-    extrapolate(xs, ys, dys, x)
+    extrapolate(xs, ys, dys, x; exact=false)
 
-Like `interpolate(xs, ys, dys, x; sq_errs=true)`, but defined everywhere. Returns
+Like `interpolate(xs, ys, dys, x; sq_errs=true, exact)`, but defined everywhere. Returns
 `(y, dy2, d)`. Outside the data:
 
 * `y` continues linearly from the end segment;
@@ -80,7 +88,7 @@ julia> Autoscalers.extrapolate(xs, ys, dys, 3.0)  # half a range width beyond th
 (30.0, 9.0, 0.5)
 ```
 """
-function extrapolate(xs, ys, dys, x)
+function extrapolate(xs, ys, dys, x; exact=false)
     n = length(xs)
     n ≥ 2 || throw(ArgumentError("need at least two points per curve"))
     width = xs[end] - xs[1]
@@ -91,7 +99,7 @@ function extrapolate(xs, ys, dys, x)
         y = lerp((xs[n-1], ys[n-1]), (xs[n], ys[n]), x)
         return y, dys[n]^2, (x - xs[end]) / width
     else
-        y, dy2 = interpolate(xs, ys, dys, x; sq_errs=true)
+        y, dy2 = interpolate(xs, ys, dys, x; sq_errs=true, exact)
         return y, dy2, 0.0
     end
 end
