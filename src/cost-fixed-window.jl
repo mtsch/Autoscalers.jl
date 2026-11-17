@@ -81,7 +81,9 @@ julia> map(c -> round(c; digits=3), cost_breakdown(s, 1.0, 0.25, 0.3))
 """
 function cost_breakdown(a::Autoscaler, args::Union{AbstractVector,Tuple})
     isnothing(a.eval_window) && throw(ArgumentError("`eval_window` is not set"))
-    return fixed_window_breakdown(a, get_parameters!(a, args))
+    params = get_parameters!(a, args)
+    a.integral ≠ :none && return integral_window_breakdown(a, params)
+    return fixed_window_breakdown(a, params)
 end
 cost_breakdown(a::Autoscaler, args::Vararg{Real}) = cost_breakdown(a, args)
 

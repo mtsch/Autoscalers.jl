@@ -83,6 +83,20 @@
         @test_throws ArgumentError bootstrap(s, estimate[1:2]; n=2, progress=false)
     end
 
+    @testset "goodness_of_fit" begin
+        @test length(b.costs) == n && all(c -> 0 < c < Inf, b.costs)
+        p = goodness_of_fit(b)
+        @test 1 / (n + 1) ≤ p ≤ 1
+        # A wrong model fits worse than every replicate drawn from the fitted one.
+        wrong = Autoscaler(noisy; window..., fix=(; a=0.8))
+        w = bootstrap(wrong, fit_collapse(wrong, [0.2, 0.31]).params; n=20, rng=Xoshiro(3),
+                      progress=false)
+        @test goodness_of_fit(w) == 1 / 21
+        bare = BootstrapResult(s, b.param_names, b.estimate, b.samples, b.converged,
+                               b.method, b.options)
+        @test_throws ArgumentError goodness_of_fit(bare)
+    end
+
     @testset "confint and stderror" begin
         ci = confint(b)
         se = stderror(b)
