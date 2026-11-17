@@ -136,8 +136,9 @@ function Autoscaler(
     fix=(;),
     integral=:none,
 )
-    integral in (:none, :linear, :exact, :gk, :gk_exact) ||
+    if integral ∉ (:none, :linear, :exact, :gk, :gk_exact)
         throw(ArgumentError("`integral` must be :none, :linear, :exact, :gk or :gk_exact"))
+    end
     if integral ≠ :none && (classic_cost_function || isnothing(eval_window))
         throw(ArgumentError("`integral` requires `eval_window` and the fixed-window cost"))
     end
