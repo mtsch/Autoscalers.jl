@@ -26,8 +26,8 @@ stall in an elongated simplex. Any derivative-free Optim `method` and `options` 
 passed instead.
 
 With the fixed-window cost, a warning is shown if the fitted collapse extrapolates curves
-beyond their data, i.e. its extrapolation penalty is not zero. It suggests the widest part
-of `eval_window` around its centre that needs no extrapolation.
+beyond their data. It suggests the widest part of `eval_window` around its centre that
+needs no extrapolation.
 
 # Examples
 

@@ -10,7 +10,7 @@ using SpecialFunctions: erfc, erfcinv
 using Statistics: quantile, std
 using StatsAPI: StatsAPI, confint, pvalue, stderror
 
-export Ansatz, Autoscaler, @ansatz, to_table, cost_breakdown
+export Ansatz, Autoscaler, @ansatz, to_table
 export fit_collapse, bootstrap, BootstrapResult, confint, stderror, pvalue, goodness_of_fit
 
 include("ansatz.jl")

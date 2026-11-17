@@ -66,28 +66,37 @@ const ALL = (; eval_window=(-Inf, Inf))
     xs = [0.0, 1.0, 2.0]
     ys = [0.0, 1.0, 4.0]
     es = [0.1, 0.2, 0.3]
-    @test interpolate(xs, ys, es, 1.0) == (1.0, 0.2)                # knot
-    @test interpolate(xs, ys, es, 1.0; sq_errs=true)[2] ≈ 0.04
-    y, e = interpolate(xs, ys, es, 1.5)
+    for exact in (false, true)
+        @test interpolate(xs, ys, es, 1.0; exact) == (1.0, 0.2^2)     # knot
+        @test interpolate(xs, ys, es, 2.0; exact) == (4.0, 0.3^2)     # last knot
+        @test ismissing(interpolate(xs, ys, es, -0.1; exact))
+        @test ismissing(interpolate(xs, ys, es, 2.1; exact))
+    end
+    y, v = interpolate(xs, ys, es, 1.5)
     @test y ≈ 2.5
-    @test e ≈ 0.25
-    @test interpolate(xs, ys, es, 1.5; sq_errs=true)[2] ≈ (0.04 + 0.09) / 2
-    @test ismissing(interpolate(xs, ys, es, -0.1))
-    @test ismissing(interpolate(xs, ys, es, 2.1))
+    @test v ≈ (0.04 + 0.09) / 2                  # σ² interpolated linearly
+    y, v = interpolate(xs, ys, es, 1.25; exact=true)
+    @test y ≈ 1.75
+    @test v ≈ 0.75^2 * 0.04 + 0.25^2 * 0.09      # variance of the interpolant
+    # without errors: values only
+    @test interpolate(xs, ys, 1.5) ≈ 2.5
+    @test interpolate(xs, ys, 2.0) == 4.0
+    @test ismissing(interpolate(xs, ys, -0.1))
+    @test ismissing(interpolate(xs, ys, 2.1))
 
     # extrapolate agrees with interpolate inside and is continuous at the edges
-    @test extrapolate(xs, ys, es, 1.5)[1:2] == interpolate(xs, ys, es, 1.5; sq_errs=true)
-    @test extrapolate(xs, ys, es, 1.5)[3] == 0
-    for edge in (0.0, 2.0), ε in (1e-9, -1e-9)
-        y0, dy0, _ = extrapolate(xs, ys, es, edge)
-        y1, dy1, d = extrapolate(xs, ys, es, edge + ε)
-        @test y1 ≈ y0 atol = 1e-8
-        @test dy1 ≈ dy0 atol = 1e-8
-        @test d ≤ 1e-9
+    for exact in (false, true)
+        @test extrapolate(xs, ys, es, 1.25; exact) == interpolate(xs, ys, es, 1.25; exact)
+        for edge in (0.0, 2.0), ε in (1e-9, -1e-9)
+            y0, v0 = extrapolate(xs, ys, es, edge; exact)
+            y1, v1 = extrapolate(xs, ys, es, edge + ε; exact)
+            @test y1 ≈ y0 atol = 1e-8
+            @test v1 ≈ v0 atol = 1e-8
+        end
+        # outside: the end segment continues, and the variance stays at the end value
+        @test all(extrapolate(xs, ys, es, 3.0; exact) .≈ (7.0, 0.09))   # slope 3
+        @test all(extrapolate(xs, ys, es, -1.0; exact) .≈ (-1.0, 0.01))
     end
-    @test all(extrapolate(xs, ys, es, 3.0) .≈ (7.0, 0.09, 0.5))   # slope 3, d = 1/2
-    @test all(extrapolate(xs, ys, es, -1.0) .≈ (-1.0, 0.01, 0.5))
-    @test_throws ArgumentError extrapolate([0.0], [0.0], [1.0], 0.0)
 end
 
 @testset "@ansatz" begin
@@ -325,6 +334,8 @@ end
     )
     @test_throws ArgumentError Autoscaler(data; ALL..., fix=(; c=1.0))
     @test_throws ArgumentError Autoscaler(data; ALL..., fix=Dict(:a => 1.0))
+    @test_throws ArgumentError Autoscaler(data; ALL..., fix=(; a=NaN))
+    @test_throws ArgumentError Autoscaler(s4; fix=(; b=NaN))
     @test_throws ArgumentError Autoscaler(
         synthetic((L, x) -> x; sizes=[4], xs=0:0.1:1); ALL...
     )
@@ -434,7 +445,7 @@ end
     @test select_subset(s, 1.0, curve(6))[1] == [1.0, 2.0, 1.0, 3.0]
 end
 
-@testset "to_table and cost_breakdown" begin
+@testset "to_table" begin
     g(L, x) = tanh(L * (x - 0.5))
     data = synthetic(g; sizes=[4, 6, 8], xs=0:0.02:1)
 
@@ -466,14 +477,6 @@ end
     end
     t = to_table(Autoscaler(two; eval_window=(0.0, 1.0), use_all_sizes=true), 0.0, 0.0, 0.0)
     @test t.master_curve ≈ fill(0.5, 6)
-
-    s = Autoscaler(data; classic_cost_function=true)
-    @test_throws ArgumentError cost_breakdown(s, 1.0, 0.0, 0.5)
-    s = Autoscaler(data; eval_window=(0.4, 0.6))
-    b = cost_breakdown(s, 1.0, 0.0, 0.5)
-    @test b.cost ≈ b.chi2 + b.penalty
-    @test b.penalty == 0
-    @test b.cost == s(1.0, 0.0, 0.5)
 end
 
 ###
@@ -584,7 +587,7 @@ end
         # A is only weakly constrained: L^0.0225 is nearly constant, so a shift of A is
         # almost indistinguishable from a constant in the master curve.
         @test p[1] ≈ A0 atol = 0.02
-        @test cost_breakdown(s, p).penalty < 0.1
+        @test !Autoscalers.extrapolates(s, p)
     end
 
     @testset "free crossover exponent" begin
@@ -648,7 +651,7 @@ end
     @test p[2] ≈ β0 atol = 0.5
     @test p[3] ≈ xc0 atol = 5e-4
     @test c < 2
-    @test cost_breakdown(s, p).penalty < 0.1
+    @test !Autoscalers.extrapolates(s, p)
 
     t = to_table(s, p)
     @test keys(t) == (:L, :u, :x, :y, :y_err, :master_curve, :in_window)
@@ -678,7 +681,7 @@ end
 ### Behaviour of the fixed-window cost
 ###
 
-@testset "fixed-window cost is continuous and cannot be gamed" begin
+@testset "fixed-window cost is continuous" begin
     a0, b0, xc0 = 1.0, 0.0, 0.3
     g(L, x) = L^(-b0) * tanh(L^a0 * (x - xc0))
     xs = range(xc0 - 0.1, xc0 + 0.1; length=81)
@@ -692,11 +695,8 @@ end
     jumps = abs.(diff(cs))
     @test maximum(jumps) < 0.05 * maximum(cs)
 
-    # large exponents push the data outside each other's range: penalised, not rewarded
-    @test cost_breakdown(s, 2.5, b0, xc0).penalty > 0
-    @test s(2.5, b0, xc0) > s(a0, b0, xc0)
-    # absurd shifts of x_c are penalised as well
-    @test s(a0, b0, xc0 + 1.0) > 100 * s(a0, b0, xc0)
+    # large exponents push the data outside each other's range
+    @test Autoscalers.extrapolates(s, (2.5, b0, xc0))
 
     # the scored set of points never changes with the parameters
     n_before = count(s.eval_mask)
@@ -712,15 +712,23 @@ end
     window = (xc0 - 0.025, xc0 + 0.025)
 
     @test_throws ArgumentError Autoscaler(data; eval_window=window, integral=:simpson)
+    @test_throws ArgumentError Autoscaler(data; eval_window=window, integral=:linear)
     @test_throws ArgumentError Autoscaler(data; integral=:gk)
     @test_throws ArgumentError Autoscaler(data; classic_cost_function=true, integral=:gk)
+    # a window that touches every curve only at a point leaves nothing to integrate
+    edge = maximum(data.x)
+    @test Autoscaler(data; eval_window=(edge, edge + 1)) isa Autoscaler
+    @test_throws ArgumentError Autoscaler(data; eval_window=(edge, edge + 1), integral=:gk)
 
-    for integral in (:linear, :exact, :gk, :gk_exact)
+    for integral in (:gk, :gk_exact)
         s = Autoscaler(data; eval_window=window, integral)
         @test isfinite(s(a0, b0, xc0))
-        @test cost_breakdown(s, a0, b0, xc0).cost ≈ s(a0, b0, xc0)
         # pushing the curves apart makes the master curve extrapolate
-        @test cost_breakdown(s, 2.5, b0, xc0).penalty > 0
+        @test Autoscalers.extrapolates(s, (2.5, b0, xc0))
+        # continuous in the parameters, also where curves stop covering the window
+        cs = [s(a, b0, xc0) for a in range(0.5, 2.5; length=201)]
+        @test all(isfinite, cs)
+        @test maximum(abs, diff(cs)) < 0.05 * maximum(cs)
     end
     for (integral, expected) in ((:gk, 2 / 3), (:gk_exact, 1.0))
         s = Autoscaler(data; eval_window=window, integral)

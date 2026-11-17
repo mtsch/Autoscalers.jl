@@ -85,8 +85,8 @@
 
     @testset "goodness_of_fit" begin
         @test length(b.costs) == n && all(c -> 0 < c < Inf, b.costs)
-        p = goodness_of_fit(b)
-        @test 1 / (n + 1) ≤ p ≤ 1
+        # the data come from the fitted model, so the test should not reject it
+        @test goodness_of_fit(b) > 0.05
         # A wrong model fits worse than every replicate drawn from the fitted one.
         wrong = Autoscaler(noisy; window..., fix=(; a=0.8))
         w = bootstrap(wrong, fit_collapse(wrong, [0.2, 0.31]).params; n=20, rng=Xoshiro(3),
@@ -215,7 +215,7 @@
         )
         @test 0.22 ≤ suggested[1] < 0.3 < suggested[2] ≤ 0.38
         inside = Autoscaler(noisy; eval_window=suggested)
-        @test cost_breakdown(inside, fit.params).penalty == 0
+        @test !Autoscalers.extrapolates(inside, fit.params)
 
         # the bootstrap and its test warn once for all refits, not once per refit
         kw = (; rng=Xoshiro(5), progress=false)
