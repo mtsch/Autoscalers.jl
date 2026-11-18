@@ -10,7 +10,7 @@ function pooled_master_curve(a::Autoscaler)
         numerator = denominator = 0.0
         for c in 1:n_curves(a)
             xs, ys, dys = scaled_data(a, c)
-            point = interpolate(xs, ys, dys, x; sq_errs=true)
+            point = interpolate(xs, ys, dys, x)
             if !ismissing(point)
                 numerator += point[1] / point[2]
                 denominator += 1 / point[2]
@@ -139,10 +139,13 @@ end
 
 # One warning for all refits of a bootstrap, instead of one per refit.
 function warn_extrapolated_replicates(k, n, what; hypothesis=false)
-    k > 0 || hypothesis || return nothing
-    also = hypothesis ? " (and the fit under the hypothesis)" : ""
-    @warn "$k of $n $what$also extrapolate curves beyond their data, so their cost " *
-          "includes the extrapolation penalty; consider shrinking `eval_window`."
+    parts = String[]
+    k > 0 && push!(parts, "$k of $n $what extrapolate")
+    hypothesis && push!(parts, "the fit under the hypothesis extrapolates")
+    isempty(parts) && return nothing
+    @warn uppercasefirst(join(parts, ", and ")) * " curves beyond their data, so the " *
+          "cost compares them with extrapolated master curves; consider shrinking " *
+          "`eval_window`."
     return nothing
 end
 
@@ -155,11 +158,16 @@ fit converged.
 
 # Fields
 
+* `autoscaler`: the `Autoscaler` the bootstrap was run with.
+* `param_names`: the names of the free parameters, in the order of `estimate`.
 * `estimate`: the free parameters the bootstrap was run at.
 * `samples`: the refitted free parameters, one row per replicate and one column per
   parameter.
 * `converged`: whether each replicate's fit converged.
-* `costs`: the minimum cost of each replicate's fit.
+* `method`, `options`: the Optim method and options of the refits, reused by
+  [`pvalue`](@ref).
+* `costs`: the minimum cost of each replicate's fit (`NaN` for a result built without
+  them).
 """
 struct BootstrapResult{A<:Autoscaler,M,O}
     autoscaler::A
@@ -203,7 +211,8 @@ end
 
 Parametric bootstrap (Efron & Tibshirani, 1993; Davison & Hinkley, 1997) of the free
 parameters around their fitted values `estimate`. Returns a [`BootstrapResult`](@ref), for
-use with [`confint`](@ref), [`stderror`](@ref) and [`pvalue`](@ref).
+use with [`confint`](@ref), [`stderror`](@ref), [`pvalue`](@ref) and
+[`goodness_of_fit`](@ref).
 
 The fitted collapse is taken as the true model:
 
@@ -212,8 +221,8 @@ The fitted collapse is taken as the true model:
    with errors.
 2. Each of the `n` replicates adds Gaussian noise of the measured errors to that model
    (and to the other columns with errors).
-3. Each replicate is refitted with [`fit_collapse`](@ref), using `method` and `options`,
-   starting from `estimate`.
+3. Each replicate is refitted like [`fit_collapse`](@ref) (without its per-fit warning),
+   using `method` and `options`, starting from `estimate`.
 
 If any refit extrapolates curves beyond their data (see [`fit_collapse`](@ref)), a single
 warning reports how many did.
@@ -299,7 +308,7 @@ end
     goodness_of_fit(b::BootstrapResult)
 
 Bootstrap goodness-of-fit test of the collapse: the fraction of replicates whose fitted
-cost is at least the observed one,
+cost is at least the observed one, counting the observed data as one more replicate,
 
 ```math
 p = \\frac{1 + \\#\\{i : C^*_i \\ge C\\}}{n + 1},
@@ -607,9 +616,8 @@ function null_pvalue(
         if free_fit.converged && null_fit.converged
             statistics[i] = null_fit.cost - free_fit.cost
         end
-        extrapolated[i] =
-            extrapolates(free_data, free_fit.params) ||
-            extrapolates(null_data, null_fit.params)
+        free_extrapolates = extrapolates(free_data, free_fit.params)
+        extrapolated[i] = free_extrapolates || extrapolates(null_data, null_fit.params)
     end
     warn_extrapolated_replicates(
         count(extrapolated), n, "bootstrap test replicates";

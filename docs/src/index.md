@@ -8,7 +8,6 @@ Automated finite-size scaling analysis (data collapse) in Julia.
 @ansatz
 Ansatz
 Autoscaler
-cost_breakdown
 to_table
 ```
 

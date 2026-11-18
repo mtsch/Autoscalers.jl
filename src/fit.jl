@@ -25,9 +25,8 @@ By default this uses the Nelder–Mead simplex method with a small initial simpl
 stall in an elongated simplex. Any derivative-free Optim `method` and `options` can be
 passed instead.
 
-With the fixed-window cost, a warning is shown if the fitted collapse extrapolates curves
-beyond their data, i.e. its extrapolation penalty is not zero. It suggests the widest part
-of `eval_window` around its centre that needs no extrapolation.
+With a window cost, a warning is shown if the fitted collapse extrapolates curves beyond
+their data. It suggests the largest part of `eval_window` that needs no extrapolation.
 
 # Examples
 

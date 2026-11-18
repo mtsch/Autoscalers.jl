@@ -16,90 +16,82 @@ function lerp((x1, y1), (x2, y2), selected_x)
     end
 end
 
+# Index `k` of the segment `x[k] ≤ selected_x < x[k + 1]`, or of the last knot if
+# `selected_x` is on it; 0 outside the data.
+function segment(x, selected_x)
+    k = searchsortedlast(x, selected_x)
+    return k == length(x) && x[k] ≠ selected_x ? 0 : k
+end
+
 """
-    interpolate(x, y, y_err, selected_x; sq_errs=false, exact=false)
+    interpolate(x, y, y_err, selected_x; exact=false)
     interpolate(x, y, selected_x)
 
-Linearly interpolate `y` and `y_err` between the knots `x` at `selected_x`. With
-`sq_errs=true`, the squared errors are interpolated and returned instead. With
-`exact=true` (which implies `sq_errs`), the variance of the interpolant of independent
-points, ``(1 - λ)^2 σ_1^2 + λ^2 σ_2^2``, is returned instead. Returns `(y, y_err)`, or
-`missing` outside the range of `x`. Without `y_err`, returns only the interpolated `y`.
+Linearly interpolate `y` between the knots `x` at `selected_x`, and return `(y, variance)`,
+or `missing` outside the range of `x`. The variance interpolates `y_err²` linearly or,
+with `exact=true`, is the variance of the interpolant of independent points,
+``(1 - λ)^2 σ_k^2 + λ^2 σ_{k+1}^2`` with ``λ = (x_\\mathrm{sel} - x_k)/(x_{k+1} - x_k)``.
+Without `y_err`, only the interpolated `y` is returned.
 
 ```jldoctest
 julia> x, y, y_err = [0.0, 1.0, 2.0], [0.0, 10.0, 20.0], [1.0, 1.0, 3.0];
 
-julia> Autoscalers.interpolate(x, y, y_err, 1.5)
-(15.0, 2.0)
-
-julia> Autoscalers.interpolate(x, y, y_err, 1.5; sq_errs=true)  # mean of 1² and 3²
+julia> Autoscalers.interpolate(x, y, y_err, 1.5)  # mean of 1² and 3²
 (15.0, 5.0)
 
 julia> Autoscalers.interpolate(x, y, y_err, 1.5; exact=true)  # (1² + 3²) / 4
 (15.0, 2.5)
 
+julia> Autoscalers.interpolate(x, y, 1.5)
+15.0
+
 julia> Autoscalers.interpolate(x, y, y_err, 3.0)
 missing
 ```
 """
-function interpolate(x, y, y_err, selected_x; sq_errs=false, exact=false)
-    indices = searchsorted(x, selected_x)
-    if indices.start ≤ indices.stop
-        # exact hit on a knot
-        e = y_err[indices.start]
-        return y[indices.start], (sq_errs || exact) ? e^2 : e
-    elseif indices.start > length(x) || indices.stop ≤ 0
-        return missing
+function interpolate(x, y, y_err, selected_x; exact=false)
+    k = segment(x, selected_x)
+    k == 0 && return missing
+    x[k] == selected_x && return y[k], y_err[k]^2
+    value = lerp((x[k], y[k]), (x[k + 1], y[k + 1]), selected_x)
+    if exact
+        λ = (selected_x - x[k]) / (x[k + 1] - x[k])
+        return value, (1 - λ)^2 * y_err[k]^2 + λ^2 * y_err[k + 1]^2
     else
-        # `indices` is an empty range: stop < start
-        left = indices.stop
-        right = indices.start
-        e1, e2 = y_err[left], y_err[right]
-        value = lerp((x[left], y[left]), (x[right], y[right]), selected_x)
-        if exact
-            λ = (selected_x - x[left]) / (x[right] - x[left])
-            return value, (1 - λ)^2 * e1^2 + λ^2 * e2^2
-        elseif sq_errs
-            return value, lerp((x[left], e1^2), (x[right], e2^2), selected_x)
-        else
-            return value, lerp((x[left], e1), (x[right], e2), selected_x)
-        end
+        return value, lerp((x[k], y_err[k]^2), (x[k + 1], y_err[k + 1]^2), selected_x)
     end
 end
-interpolate(x, y, selected_x) = first(interpolate(x, y, y, selected_x))
+function interpolate(x, y, selected_x)
+    k = segment(x, selected_x)
+    k == 0 && return missing
+    x[k] == selected_x && return y[k]
+    return lerp((x[k], y[k]), (x[k + 1], y[k + 1]), selected_x)
+end
 
 """
     extrapolate(xs, ys, dys, x; exact=false)
 
-Like `interpolate(xs, ys, dys, x; sq_errs=true, exact)`, but defined everywhere. Returns
-`(y, dy2, d)`. Outside the data:
-
-* `y` continues linearly from the end segment;
-* `dy2` is held at its value at the end;
-* `d` is the distance outside the data range, in units of the range width (`0` inside).
+Like `interpolate(xs, ys, dys, x; exact)`, but defined everywhere. Outside the data, `y`
+continues linearly from the end segment and the variance is held at its value at the end.
 
 ```jldoctest
 julia> xs, ys, dys = [0.0, 1.0, 2.0], [0.0, 10.0, 20.0], [1.0, 1.0, 3.0];
 
 julia> Autoscalers.extrapolate(xs, ys, dys, 1.5)
-(15.0, 5.0, 0.0)
+(15.0, 5.0)
 
-julia> Autoscalers.extrapolate(xs, ys, dys, 3.0)  # half a range width beyond the end
-(30.0, 9.0, 0.5)
+julia> Autoscalers.extrapolate(xs, ys, dys, 3.0)
+(30.0, 9.0)
 ```
 """
 function extrapolate(xs, ys, dys, x; exact=false)
-    n = length(xs)
-    n ≥ 2 || throw(ArgumentError("need at least two points per curve"))
-    width = xs[end] - xs[1]
     if x < xs[1]
-        y = lerp((xs[1], ys[1]), (xs[2], ys[2]), x)
-        return y, dys[1]^2, (xs[1] - x) / width
+        return lerp((xs[1], ys[1]), (xs[2], ys[2]), x), dys[1]^2
     elseif x > xs[end]
-        y = lerp((xs[n-1], ys[n-1]), (xs[n], ys[n]), x)
-        return y, dys[n]^2, (x - xs[end]) / width
+        return lerp((xs[end - 1], ys[end - 1]), (xs[end], ys[end]), x), dys[end]^2
     else
-        y, dy2 = interpolate(xs, ys, dys, x; sq_errs=true, exact)
-        return y, dy2, 0.0
+        # Never `missing` inside the data; destructuring tells the compiler so.
+        y, dy2 = interpolate(xs, ys, dys, x; exact)
+        return y, dy2
     end
 end

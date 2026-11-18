@@ -2,7 +2,6 @@
     Autoscaler(
         table, ansatz::Ansatz=DEFAULT_ANSATZ;
         eval_window=nothing,
-        penalty=100.0,
         classic_cost_function=false,
         use_all_sizes=false,
         fix=(;),
@@ -25,9 +24,11 @@ functions must be chosen:
 * **Fixed window** (`eval_window = (lo, hi)`): only points with
   ``\\mathrm{lo} ≤ x ≤ \\mathrm{hi}`` in the *unscaled* ``x`` are scored, so the scored set
   does not change with the parameters. Points outside it still serve for interpolation.
-  Where another curve does not reach a point's scaled ``x``, it is extrapolated linearly
-  and `penalty` ``× d^2`` is added, with ``d`` the distance outside in units of that
-  curve's scaled range.
+  Where another curve does not reach a point's scaled ``x``, it is extrapolated linearly,
+  with the variance held at its value at the end. Nothing is added to the cost for this,
+  so a window wider than the range the curves have in common can bias the fit;
+  [`fit_collapse`](@ref) warns when the fitted collapse extrapolates and suggests a
+  window that needs no extrapolation.
 * **Classic** (`classic_cost_function=true`): the cost of Houdayer & Hartmann (2004), with
   a local linear fit through the neighbouring points of the other curves. It scores every
   point where the curves overlap in the *scaled* ``x``, so for the smallest sizes it
@@ -44,14 +45,18 @@ sizes, so the fixed window is recommended.
 * `fix`: parameters held at fixed values, e.g. `fix=(; a=1/ν)`. They are left out of the
   arguments of the cost.
 * `integral` (experimental, fixed-window cost only): instead of summing over the points
-  in the window, integrate the squared deviation of each curve's linear interpolant from
-  the master curve over the part of the window the curve covers, normalised by its length.
-  `:gk` and `:gk_exact` use adaptive Gauss–Kronrod quadrature (Kronrod 1965) between the
-  points of all curves, which makes the cost smooth in the parameters; `:linear` and
-  `:exact` use the trapezoidal rule on those points. `:gk_exact` and `:exact` use the
-  variance of the interpolant, ``(1 - λ)^2 σ_k^2 + λ^2 σ_{k+1}^2``, so that a correct
-  collapse costs about 1; `:gk` and `:linear` interpolate ``σ^2`` linearly, which gives
-  about ``2/3``. The default `:none` is the sum.
+  in the window, integrate the ``χ^2`` density of each curve's linear interpolant against
+  the master curve over the part of the window the curve covers. The integral is taken
+  in the scaled ``x`` and divided by the scaled length of that part; for an ansatz with
+  ``x`` affine in the unscaled ``x``, such as ``L^a (x - x_c)``, this is the mean over
+  the window. It is evaluated with adaptive Gauss–Kronrod quadrature (QuadGK.jl)
+  between the points of all curves. The sum has a kink in the parameters wherever a point
+  of one curve crosses a point of another in scaled ``x``; the integral does not. `:gk`
+  interpolates ``σ^2`` linearly, so a correct collapse costs about ``2/3``; `:gk_exact`
+  uses the variance of the interpolant, ``(1 - λ)^2 σ_k^2 + λ^2 σ_{k+1}^2`` with
+  ``λ = (x - x_k)/(x_{k+1} - x_k)``, so it costs about 1. The default `:none` is the sum.
+  A curve takes part if its data cover a part of the window of positive length, even
+  without a data point inside it.
 
 # Data requirements
 
@@ -107,24 +112,17 @@ struct Autoscaler{P,A<:Ansatz{P},D<:NamedTuple,E<:NamedTuple}
     curve_ranges::Vector{UnitRange{Int}}
     curve_labels::Vector{String}
 
-    # Scratch space for the classic cost function.
-    selected_x_val::Vector{Float64}
-    selected_y_val::Vector{Float64}
-    selected_y_err::Vector{Float64}
-
-    hardcodes::Vector{Float64}
+    # Values of the fixed parameters, NaN for the free ones; the buffer for the full
+    # parameter vector.
+    fixed::Vector{Float64}
     last_params::Vector{Float64}
 
-    classic_cost_function::Bool
+    # :classic, :sum (fixed window), or the windowed integrals :gk and :gk_exact.
+    cost::Symbol
     use_all_sizes::Bool
 
     eval_window::Union{Nothing,Tuple{Float64,Float64}}
     eval_mask::BitVector
-    penalty::Float64
-    # Experimental windowed integral cost: :none, or trapezoidal with :linear or :exact
-    # interpolated variance, or :gk and :gk_exact (adaptive Gauss–Kronrod with the linear
-    # or exact variance).
-    integral::Symbol
 end
 
 function Autoscaler(
@@ -132,34 +130,34 @@ function Autoscaler(
     classic_cost_function=false,
     use_all_sizes=false,
     eval_window=nothing,
-    penalty=100.0,
     fix=(;),
     integral=:none,
 )
-    if integral ∉ (:none, :linear, :exact, :gk, :gk_exact)
-        throw(ArgumentError("`integral` must be :none, :linear, :exact, :gk or :gk_exact"))
-    end
-    if integral ≠ :none && (classic_cost_function || isnothing(eval_window))
-        throw(ArgumentError("`integral` requires `eval_window` and the fixed-window cost"))
-    end
-    if !(fix isa NamedTuple)
-        throw(ArgumentError("`fix` must be a `NamedTuple`, e.g. `(; a=1.5)`"))
-    end
-    for k in keys(fix)
-        k in ansatz.param_names || throw(ArgumentError("`$k` in `fix` is not a parameter"))
-    end
+    check_fix(ansatz, fix)
     if classic_cost_function
-        isnothing(eval_window) || throw(ArgumentError(
-            "`eval_window` and `classic_cost_function` are mutually exclusive"
-        ))
-        use_all_sizes && throw(ArgumentError(
-            "`use_all_sizes` applies to the fixed-window cost only"
-        ))
+        if !isnothing(eval_window)
+            throw(ArgumentError(
+                "`eval_window` and `classic_cost_function` are mutually exclusive"
+            ))
+        end
+        if use_all_sizes
+            throw(ArgumentError("`use_all_sizes` applies to the fixed-window cost only"))
+        end
+        if integral ≠ :none
+            throw(ArgumentError("`integral` applies to the fixed-window cost only"))
+        end
+        cost = :classic
     elseif isnothing(eval_window)
         throw(ArgumentError(
             "choose a cost function: `eval_window=(lo, hi)` scores the points with " *
             "lo ≤ x ≤ hi, or `classic_cost_function=true`"
         ))
+    elseif integral == :none
+        cost = :sum
+    elseif integral in (:gk, :gk_exact)
+        cost = integral
+    else
+        throw(ArgumentError("`integral` must be :none, :gk or :gk_exact"))
     end
 
     L = ansatz.size
@@ -262,13 +260,15 @@ function Autoscaler(
         ew = (Float64(eval_window[1]), Float64(eval_window[2]))
         ew[1] < ew[2] || throw(ArgumentError("`eval_window` must satisfy lo < hi"))
         eval_mask = BitVector(ew[1] .≤ x_raw .≤ ew[2])
+        uses(r) = uses_window(cost, view(x_raw, r), ew)
+        what = cost == :sum ? "data points inside" : "data covering a part of"
         for (range, label) in zip(curve_ranges, curve_labels)
-            if !any(view(eval_mask, range))
-                @warn "$label has no data points inside `eval_window`; " *
-                      "it will only be used for interpolation."
+            if !uses(range)
+                @warn "$label has no $what `eval_window`; it will only be used for " *
+                      "interpolation."
             end
         end
-        any(eval_mask) || throw(ArgumentError("no data points inside `eval_window`"))
+        any(uses, curve_ranges) || throw(ArgumentError("no $what `eval_window`"))
     end
 
     n = length(sizes)
@@ -277,17 +277,40 @@ function Autoscaler(
         ansatz, data, errors,
         zeros(n), zeros(n), zeros(n),
         sizes, curve, curve_ranges, curve_labels,
-        Float64[], Float64[], Float64[],
         fill(NaN, n_params), zeros(n_params),
-        classic_cost_function, use_all_sizes,
-        ew, eval_mask, Float64(penalty), integral,
+        cost, use_all_sizes, ew, eval_mask,
     )
-    return hardcode_params!(result, fix)
+    return fix_params!(result, fix)
 end
 
-function hardcode_params!(a::Autoscaler, fix::NamedTuple)
-    for (i, p) in enumerate(a.ansatz.param_names)
-        a.hardcodes[i] = get(fix, p, NaN)
+# Whether the window cost scores curve data with raw `x` values `ts`: the sum needs a point
+# in `window`, the integral a part of it of positive length.
+function uses_window(cost, ts, (lo, hi))
+    if cost == :sum
+        return any(t -> lo ≤ t ≤ hi, ts)
+    else
+        return !isnothing(raw_overlap(ts, (lo, hi)))
+    end
+end
+function uses_window(a::Autoscaler, c)
+    return uses_window(a.cost, view(raw_x(a), a.curve_ranges[c]), a.eval_window)
+end
+
+# NaN marks a free parameter in `fixed`, so it cannot be a fixed value.
+function check_fix(ansatz::Ansatz, fix)
+    if !(fix isa NamedTuple)
+        throw(ArgumentError("`fix` must be a `NamedTuple`, e.g. `(; a=1.5)`"))
+    end
+    for (k, v) in pairs(fix)
+        k in ansatz.param_names || throw(ArgumentError("`$k` in `fix` is not a parameter"))
+        isnan(v) && throw(ArgumentError("`$k` in `fix` must not be NaN"))
+    end
+    return nothing
+end
+
+function fix_params!(a::Autoscaler, fix::NamedTuple)
+    for (name, value) in pairs(fix)
+        a.fixed[findfirst(==(name), a.ansatz.param_names)] = value
     end
     return a
 end
@@ -298,8 +321,11 @@ end
 A copy of `a` with its own buffers, so it can be evaluated concurrently with `a`.
 
 * `data` replaces the data columns. It must have the same columns and rows as `a.data`,
-  in the same order.
-* `fix` fixes parameters in addition to those already fixed in `a`.
+  in the same order, and only the values in columns other than `x`, the size and the
+  `group` columns may differ, since those define the curves and the window. The values
+  must be finite.
+* `fix` fixes parameters in addition to those already fixed in `a`; for a parameter
+  that is fixed already, it replaces the value.
 
 # Examples
 
@@ -316,25 +342,28 @@ true
 ```
 """
 function Autoscaler(a::Autoscaler; data=a.data, fix=(;))
-    for k in keys(fix)
-        if k ∉ a.ansatz.param_names
-            throw(ArgumentError("`$k` in `fix` is not a parameter"))
+    check_fix(a.ansatz, fix)
+    n = length(a.sizes)
+    if keys(data) ≠ keys(a.data) || any(v -> length(v) ≠ n, data)
+        throw(ArgumentError("`data` must have the same columns and rows as `a.data`"))
+    end
+    for c in keys(data)
+        if c in (a.ansatz.size, a.ansatz.x, a.ansatz.group...)
+            if data[c] ≠ a.data[c]
+                throw(ArgumentError("`data` must not change column `$c`"))
+            end
+        elseif !all(isfinite, data[c])
+            throw(ArgumentError("column `$c` of `data` must be finite"))
         end
     end
-    n = length(a.sizes)
-    result = Autoscaler(
-        a.ansatz, data, a.errors,
-        zeros(n), zeros(n), zeros(n),
-        a.sizes, a.curve, a.curve_ranges, a.curve_labels,
-        Float64[], Float64[], Float64[],
-        copy(a.hardcodes), zeros(length(a.last_params)),
-        a.classic_cost_function, a.use_all_sizes,
-        a.eval_window, a.eval_mask, a.penalty, a.integral,
+    # Fresh buffers and the new data; every other field is shared with `a`.
+    replaced = (;
+        data,
+        x_val_scaled=zeros(n), y_val_scaled=zeros(n), y_err_scaled=zeros(n),
+        fixed=copy(a.fixed), last_params=zeros(length(a.last_params)),
     )
-    for (name, value) in pairs(fix)
-        result.hardcodes[findfirst(==(name), a.ansatz.param_names)] = value
-    end
-    return result
+    fields = (get(replaced, f, getfield(a, f)) for f in fieldnames(Autoscaler))
+    return fix_params!(Autoscaler(fields...), fix)
 end
 
 Base.show(io::IO, a::Autoscaler) = print(io, "Autoscaler(", a.ansatz, ")")
@@ -342,10 +371,10 @@ Base.show(io::IO, a::Autoscaler) = print(io, "Autoscaler(", a.ansatz, ")")
 """
     free_parameter_names(a::Autoscaler)
 
-Names of the parameters that are not hardcoded, in the order the cost function expects them.
+Names of the parameters that are not fixed, in the order the cost function expects them.
 """
 function free_parameter_names(a::Autoscaler)
-    return Tuple(p for (p, h) in zip(a.ansatz.param_names, a.hardcodes) if isnan(h))
+    return Tuple(p for (p, v) in zip(a.ansatz.param_names, a.fixed) if isnan(v))
 end
 
 # Tags the dual numbers that carry the data errors, as `ForwardDiff.Tag{ErrorPropagation}`,
@@ -434,7 +463,7 @@ end
 """
     get_parameters(a::Autoscaler, args)
 
-Combine the free parameters `args` with the hardcoded ones into the full parameter vector.
+Combine the free parameters `args` with the fixed ones into the full parameter vector.
 """
 get_parameters(a::Autoscaler, args) = copy(get_parameters!(a, args))
 
@@ -445,7 +474,7 @@ Like [`get_parameters`](@ref), but returns an internal buffer that is overwritte
 next call. Avoids an allocation per cost evaluation.
 """
 function get_parameters!(a::Autoscaler, args)
-    expected = count(isnan, a.hardcodes)
+    expected = count(isnan, a.fixed)
     if length(args) ≠ expected
         throw(ArgumentError("expected $(expected) params, got $(length(args))"))
     end
@@ -453,11 +482,11 @@ function get_parameters!(a::Autoscaler, args)
     params = a.last_params
     arg_idx = 1
     for i in eachindex(params)
-        if isnan(a.hardcodes[i])
+        if isnan(a.fixed[i])
             params[i] = args[arg_idx]
             arg_idx += 1
         else
-            params[i] = a.hardcodes[i]
+            params[i] = a.fixed[i]
         end
     end
     return params
@@ -468,15 +497,19 @@ end
 
 """
     to_table(a::Autoscaler, args...)
+    to_table(a::Autoscaler, params::AbstractVector)
 
-The data scaled with the free parameters `args`, for plotting the collapse. Returns a
-`NamedTuple` of columns, one row per data point:
+The data scaled with the free parameters `args` (or a vector of them), for plotting the
+collapse. Returns a `NamedTuple` of columns, one row per data point:
 
 * `L`: system size;
 * the `group` columns of the ansatz, if any;
 * `x`, `y`, `y_err`: scaled values;
-* `master_curve`: the master curve the point is compared to;
-* `in_window`: whether the point is scored by the fixed-window cost.
+* `master_curve`: the master curve the point is compared to (`NaN` where the classic
+  cost has none, because no other curve brackets the point);
+* `in_window`: whether the unscaled `x` lies in `eval_window` (always `true` for the
+  classic cost). These are the points the fixed-window sum scores; the integral uses
+  the whole part of the window each curve covers.
 
 The column names are always these, whatever the columns are called in the data. With
 DataFrames.jl loaded, `DataFrame(a, args)` returns the same as a `DataFrame`.
@@ -500,13 +533,16 @@ to_table(a::Autoscaler, args::Vararg{Real}) = to_table(a, args)
 function to_table(a::Autoscaler, args::Union{AbstractVector,Tuple})
     params = get_parameters!(a, args)
     transform!(a, params)
-    if a.classic_cost_function
+    if a.cost == :classic
         master = map(zip(a.x_val_scaled, a.curve)) do (x, c)
             m = standard_master_curve(a, x, c)
             ismissing(m) ? NaN : m[1]
         end
     else
-        master = [fixed_master_curve(a, x, c).Y for (x, c) in zip(a.x_val_scaled, a.curve)]
+        exact = a.cost == :gk_exact
+        master = map(zip(a.x_val_scaled, a.curve)) do (x, c)
+            return fixed_master_curve(a, x, c; exact).Y
+        end
     end
     group = a.ansatz.group
     return (;
@@ -521,11 +557,11 @@ function to_table(a::Autoscaler, args::Union{AbstractVector,Tuple})
 end
 
 function cost_function(a::Autoscaler, params)
-    if a.classic_cost_function
+    if a.cost == :classic
         return standard_cost_function(a, params)
-    elseif a.integral ≠ :none
-        return integral_window_cost(a, params)
-    else
+    elseif a.cost == :sum
         return fixed_window_cost(a, params)
+    else
+        return integral_window_cost(a, params)
     end
 end
