@@ -780,6 +780,11 @@ end
     gk_exact = Autoscaler(data; eval_window=window, integral=:gk_exact)
     @test gk(a0, b0, xc0) / gk_exact(a0, b0, xc0) ≈ 2 / 3 atol = 0.05
 
+    # copies, e.g. for bootstrap refits on other threads, get their own scratch space
+    copied = Autoscaler(gk)
+    @test copied.knots !== gk.knots && copied.segbuf !== gk.segbuf
+    @test copied(a0, b0, xc0) == gk(a0, b0, xc0)
+
     # to_table compares with the master curve of the cost, i.e. with the exact variance
     t = to_table(gk_exact, a0, b0, xc0)
     t_linear = to_table(gk, a0, b0, xc0)
