@@ -133,14 +133,7 @@ function Autoscaler(
     fix=(;),
     integral=:none,
 )
-    if integral ∉ (:none, :gk, :gk_exact)
-        throw(ArgumentError("`integral` must be :none, :gk or :gk_exact"))
-    end
-    if integral ≠ :none && (classic_cost_function || isnothing(eval_window))
-        throw(ArgumentError("`integral` requires `eval_window` and the fixed-window cost"))
-    end
     check_fix(ansatz, fix)
-    cost = classic_cost_function ? :classic : integral == :none ? :sum : integral
     if classic_cost_function
         if !isnothing(eval_window)
             throw(ArgumentError(
@@ -150,11 +143,21 @@ function Autoscaler(
         if use_all_sizes
             throw(ArgumentError("`use_all_sizes` applies to the fixed-window cost only"))
         end
+        if integral ≠ :none
+            throw(ArgumentError("`integral` applies to the fixed-window cost only"))
+        end
+        cost = :classic
     elseif isnothing(eval_window)
         throw(ArgumentError(
             "choose a cost function: `eval_window=(lo, hi)` scores the points with " *
             "lo ≤ x ≤ hi, or `classic_cost_function=true`"
         ))
+    elseif integral == :none
+        cost = :sum
+    elseif integral in (:gk, :gk_exact)
+        cost = integral
+    else
+        throw(ArgumentError("`integral` must be :none, :gk or :gk_exact"))
     end
 
     L = ansatz.size
@@ -257,7 +260,7 @@ function Autoscaler(
         ew = (Float64(eval_window[1]), Float64(eval_window[2]))
         ew[1] < ew[2] || throw(ArgumentError("`eval_window` must satisfy lo < hi"))
         eval_mask = BitVector(ew[1] .≤ x_raw .≤ ew[2])
-        uses(r) = uses_window(cost, view(x_raw, r), view(eval_mask, r), ew)
+        uses(r) = uses_window(cost, view(x_raw, r), ew)
         what = cost == :sum ? "data points inside" : "data covering a part of"
         for (range, label) in zip(curve_ranges, curve_labels)
             if !uses(range)
@@ -281,13 +284,16 @@ function Autoscaler(
 end
 
 # Whether the window cost scores curve data with raw `x` values `ts`: the sum needs a point
-# in the window (`mask`), the integral a part of the window of positive length.
-function uses_window(cost, ts, mask, window)
-    return cost == :sum ? any(mask) : !isnothing(raw_overlap(ts, window))
+# in `window`, the integral a part of it of positive length.
+function uses_window(cost, ts, (lo, hi))
+    if cost == :sum
+        return any(t -> lo ≤ t ≤ hi, ts)
+    else
+        return !isnothing(raw_overlap(ts, (lo, hi)))
+    end
 end
 function uses_window(a::Autoscaler, c)
-    r = a.curve_ranges[c]
-    return uses_window(a.cost, view(raw_x(a), r), view(a.eval_mask, r), a.eval_window)
+    return uses_window(a.cost, view(raw_x(a), a.curve_ranges[c]), a.eval_window)
 end
 
 # NaN marks a free parameter in `fixed`, so it cannot be a fixed value.
@@ -316,7 +322,8 @@ A copy of `a` with its own buffers, so it can be evaluated concurrently with `a`
 
 * `data` replaces the data columns. It must have the same columns and rows as `a.data`,
   in the same order, and only the values in columns other than `x`, the size and the
-  `group` columns may differ, since those define the curves and the window.
+  `group` columns may differ, since those define the curves and the window. The values
+  must be finite.
 * `fix` fixes parameters in addition to those already fixed in `a`; for a parameter
   that is fixed already, it replaces the value.
 
@@ -340,9 +347,13 @@ function Autoscaler(a::Autoscaler; data=a.data, fix=(;))
     if keys(data) ≠ keys(a.data) || any(v -> length(v) ≠ n, data)
         throw(ArgumentError("`data` must have the same columns and rows as `a.data`"))
     end
-    for c in (a.ansatz.size, a.ansatz.x, a.ansatz.group...)
-        if data[c] ≠ a.data[c]
-            throw(ArgumentError("`data` must not change column `$c`"))
+    for c in keys(data)
+        if c in (a.ansatz.size, a.ansatz.x, a.ansatz.group...)
+            if data[c] ≠ a.data[c]
+                throw(ArgumentError("`data` must not change column `$c`"))
+            end
+        elseif !all(isfinite, data[c])
+            throw(ArgumentError("column `$c` of `data` must be finite"))
         end
     end
     # Fresh buffers and the new data; every other field is shared with `a`.
@@ -486,9 +497,10 @@ end
 
 """
     to_table(a::Autoscaler, args...)
+    to_table(a::Autoscaler, params::AbstractVector)
 
-The data scaled with the free parameters `args`, for plotting the collapse. Returns a
-`NamedTuple` of columns, one row per data point:
+The data scaled with the free parameters `args` (or a vector of them), for plotting the
+collapse. Returns a `NamedTuple` of columns, one row per data point:
 
 * `L`: system size;
 * the `group` columns of the ansatz, if any;

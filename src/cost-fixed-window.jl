@@ -86,11 +86,12 @@ function extrapolates(a::Autoscaler, args)
 end
 
 # Unscaled x of a curve with data `(ts, xs)` at scaled `x`, moved by whole floats with
-# `step` (`nextfloat` or `prevfloat`) until mapping it back does not cross `x`: the two
-# interpolations do not invert each other exactly in floating point.
-function unscaled_at(xs, ts, x, step)
+# `step` while mapping it back still lies `beyond` `x` (`nextfloat` with `<`, or
+# `prevfloat` with `>`): the two interpolations do not invert each other exactly in
+# floating point.
+function unscaled_at(xs, ts, x, step, beyond)
     t = interpolate(xs, ts, x)::Float64
-    while (step === nextfloat ? (<) : (>))(interpolate(ts, xs, t)::Float64, x)
+    while beyond(interpolate(ts, xs, t)::Float64, x)
         t = step(t)
     end
     return t
@@ -100,14 +101,21 @@ end
     extrapolation_free_window(a::Autoscaler, args)
 
 At the free parameters `args`, the largest part `(lo, hi)` of `eval_window` in which the
-window cost needs no extrapolation, or `nothing` if there is none.
+window cost needs no extrapolation, or `nothing` if there is none. Always `nothing` for
+the classic cost, which has no window.
 
 Each curve that the window cost uses is covered by all other curves for scaled `x`
 between the largest first and the smallest last scaled `x` of the others. That range is
 mapped back to the curve's unscaled `x`, and these intervals are intersected.
 """
 function extrapolation_free_window(a::Autoscaler, args)
+    a.cost == :classic && return nothing
     transform!(a, get_parameters!(a, args))
+    return extrapolation_free_window(a)
+end
+
+# `extrapolation_free_window` at the current scaling of `a`.
+function extrapolation_free_window(a::Autoscaler)
     ts_all = raw_x(a)
     lo = max(a.eval_window[1], minimum(ts_all))
     hi = min(a.eval_window[2], maximum(ts_all))
@@ -120,18 +128,16 @@ function extrapolation_free_window(a::Autoscaler, args)
         # Nowhere covered: the window would have to avoid this curve's data altogether.
         (x_lo > x_hi || x_lo > xs[end] || x_hi < xs[1]) && return nothing
         if x_lo > xs[1]
-            lo = max(lo, unscaled_at(xs, ts, x_lo, nextfloat))
+            lo = max(lo, unscaled_at(xs, ts, x_lo, nextfloat, <))
         end
         if x_hi < xs[end]
-            hi = min(hi, unscaled_at(xs, ts, x_hi, prevfloat))
+            hi = min(hi, unscaled_at(xs, ts, x_hi, prevfloat, >))
         end
     end
     hi > lo || return nothing
     # The window cost must still have something to score in the suggested window.
-    in_window(range) = uses_window(
-        a.cost, view(ts_all, range), lo .≤ view(ts_all, range) .≤ hi, (lo, hi)
-    )
-    return any(in_window, a.curve_ranges) ? (lo, hi) : nothing
+    scores(range) = uses_window(a.cost, view(ts_all, range), (lo, hi))
+    return any(scores, a.curve_ranges) ? (lo, hi) : nothing
 end
 
 function warn_extrapolation(a::Autoscaler, args)
@@ -145,7 +151,7 @@ function warn_extrapolation(a::Autoscaler, args)
         n_used = count(c -> uses_window(a, c), 1:n_curves(a))
         location = "in the integration ranges of $n of $n_used curves"
     end
-    window = extrapolation_free_window(a, args)
+    window = extrapolation_free_window(a)
     if isnothing(window)
         suggestion = "no part of `eval_window` is free of it"
     else

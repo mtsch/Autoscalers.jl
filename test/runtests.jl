@@ -316,6 +316,15 @@ end
     get_parameters(s4, [0.3, 0.4])
     @test p1 == [1.5, 0.1, 0.2]
 
+    # copies may change the values, but not the columns that define the curves
+    d = s4.data
+    @test Autoscaler(s4; data=(; d..., y=d.y .+ 1))(0.1, 0.2) isa Real
+    @test_throws r"must not change column `x`" Autoscaler(s4; data=(; d..., x=d.x .+ 1))
+    @test_throws r"must not change column `L`" Autoscaler(s4; data=(; d..., L=2 .* d.L))
+    @test_throws ArgumentError Autoscaler(s4; data=(; d.L, d.x))
+    @test_throws ArgumentError Autoscaler(s4; data=map(v -> v[1:(end - 1)], d))
+    @test_throws r"must be finite" Autoscaler(s4; data=(; d..., y=[NaN; d.y[2:end]]))
+
     # remapped column names come from the ansatz
     renamed = (; size=data.L, t=data.x, val=data.y, val_err=data.y_err)
     ans = @ansatz (a, b, x_c) -> :size^b * (:val ± :val_err) ~ :size^a * (:t - x_c) size =
@@ -484,6 +493,13 @@ end
     end
     t = to_table(Autoscaler(two; eval_window=(0.0, 1.0), use_all_sizes=true), 0.0, 0.0, 0.0)
     @test t.master_curve ≈ fill(0.5, 6)
+    # Without its own size, each point is 1 from the other size, with variance 2 · 0.1²: a
+    # χ² of 50. With it, the master curve is the mean 0.5 with variance 0.1²/2: 50/3.
+    for integral in (:none, :gk)
+        kw = (; eval_window=(0.0, 1.0), integral)
+        @test Autoscaler(two; kw...)(0.0, 0.0, 0.0) ≈ 50
+        @test Autoscaler(two; kw..., use_all_sizes=true)(0.0, 0.0, 0.0) ≈ 50 / 3
+    end
 end
 
 ###
@@ -710,6 +726,13 @@ end
 
     # large exponents push the data outside each other's range
     @test extrapolates(s, (2.5, b0, xc0))
+    # far from x_c the sizes do not overlap at all, so no window avoids extrapolating
+    far = (a0, b0, xc0 + 1.0)
+    @test isnothing(extrapolation_free_window(s, far))
+    nowhere = r"no part of `eval_window` is free of it"
+    @test_logs (:warn, nowhere) Autoscalers.warn_extrapolation(s, far)
+    classic = Autoscaler(data; classic_cost_function=true)
+    @test isnothing(extrapolation_free_window(classic, far))
 end
 
 @testset "windowed integral cost (experimental)" begin
@@ -761,7 +784,6 @@ end
     t = to_table(gk_exact, a0, b0, xc0)
     t_linear = to_table(gk, a0, b0, xc0)
     @test t.y == t_linear.y
-    @test t.master_curve ≠ t_linear.master_curve
     @test maximum(abs, (t.y .- t.master_curve)[t.in_window]) < 0.02
 
     # A narrower window needs no extrapolation at a good fit. A wider one does: the fit

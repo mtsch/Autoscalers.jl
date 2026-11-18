@@ -12,17 +12,11 @@ The index ``j`` of the two neighbouring points ``j`` and ``j + 1`` of a curve wi
 ([Houdayer & Hartmann (2004)](https://doi.org/10.1103/PhysRevB.70.014418), Appendix A).
 """
 function bracket(x, selected_x)
-    n = length(x)
-    j = searchsortedlast(x, selected_x)
+    k = segment(x, selected_x)
     # On an interior knot both adjacent pairs bracket `selected_x`; the pair starting at the
     # knot matches the reference implementation (autoScale). On the last knot only the pair
     # ending there does.
-    if j == n && x[n] == selected_x
-        return n - 1
-    elseif j == 0 || j == n
-        return nothing
-    end
-    return j
+    return k == 0 ? nothing : min(k, length(x) - 1)
 end
 
 """

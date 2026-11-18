@@ -221,8 +221,8 @@ The fitted collapse is taken as the true model:
    with errors.
 2. Each of the `n` replicates adds Gaussian noise of the measured errors to that model
    (and to the other columns with errors).
-3. Each replicate is refitted with [`fit_collapse`](@ref), using `method` and `options`,
-   starting from `estimate`.
+3. Each replicate is refitted like [`fit_collapse`](@ref) (without its per-fit warning),
+   using `method` and `options`, starting from `estimate`.
 
 If any refit extrapolates curves beyond their data (see [`fit_collapse`](@ref)), a single
 warning reports how many did.

@@ -85,12 +85,12 @@ julia> Autoscalers.extrapolate(xs, ys, dys, 3.0)
 ```
 """
 function extrapolate(xs, ys, dys, x; exact=false)
-    n = length(xs)
     if x < xs[1]
         return lerp((xs[1], ys[1]), (xs[2], ys[2]), x), dys[1]^2
     elseif x > xs[end]
-        return lerp((xs[n - 1], ys[n - 1]), (xs[n], ys[n]), x), dys[n]^2
+        return lerp((xs[end - 1], ys[end - 1]), (xs[end], ys[end]), x), dys[end]^2
     else
+        # Never `missing` inside the data; destructuring tells the compiler so.
         y, dy2 = interpolate(xs, ys, dys, x; exact)
         return y, dy2
     end
