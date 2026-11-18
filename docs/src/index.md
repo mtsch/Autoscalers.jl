@@ -21,4 +21,5 @@ BootstrapResult
 confint(::BootstrapResult)
 stderror(::BootstrapResult)
 pvalue(::BootstrapResult, ::Pair{Symbol,<:Real}...)
+goodness_of_fit
 ```

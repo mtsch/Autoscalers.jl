@@ -704,6 +704,35 @@ end
     @test count(s.eval_mask) == n_before
 end
 
+@testset "windowed integral cost (experimental)" begin
+    a0, b0, xc0 = 1.0, 0.25, 0.3
+    g(L, x) = L^(-b0) * (1 + tanh(L^a0 * (x - xc0)) + 0.3 * L^a0 * (x - xc0))
+    xs = range(xc0 - 0.1, xc0 + 0.1; length=161)
+    data = synthetic(g; xs, σ=2e-3, rng=Xoshiro(42))
+    window = (xc0 - 0.025, xc0 + 0.025)
+
+    @test_throws ArgumentError Autoscaler(data; eval_window=window, integral=:simpson)
+    @test_throws ArgumentError Autoscaler(data; integral=:gk)
+    @test_throws ArgumentError Autoscaler(data; classic_cost_function=true, integral=:gk)
+
+    for integral in (:linear, :exact, :gk, :gk_exact)
+        s = Autoscaler(data; eval_window=window, integral)
+        @test isfinite(s(a0, b0, xc0))
+        @test cost_breakdown(s, a0, b0, xc0).cost ≈ s(a0, b0, xc0)
+        # pushing the curves apart makes the master curve extrapolate
+        @test cost_breakdown(s, 2.5, b0, xc0).penalty > 0
+    end
+    for (integral, expected) in ((:gk, 2 / 3), (:gk_exact, 1.0))
+        s = Autoscaler(data; eval_window=window, integral)
+        p, c = fit(s, [1.2, 0.1, 0.31])
+        @test p[1] ≈ a0 atol = 0.1
+        @test p[2] ≈ b0 atol = 0.05
+        @test p[3] ≈ xc0 atol = 3e-3
+        # normalisation of a correct collapse: ≈ 2/3 with linear variance, ≈ 1 with exact
+        @test 0.4 * expected < s(a0, b0, xc0) < 1.6 * expected
+    end
+end
+
 include("autoscale_reference.jl")
 include("bootstrap.jl")
 

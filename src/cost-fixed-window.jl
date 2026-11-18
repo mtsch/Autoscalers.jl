@@ -4,17 +4,18 @@
 # window.
 
 """
-    fixed_master_curve(a::Autoscaler, x, own_curve)
+    fixed_master_curve(a::Autoscaler, x, own_curve; exact=false)
 
 Error-weighted master curve at scaled `x`, built from all curves except `own_curve`
 (unless `a.use_all_sizes`), extrapolating where needed. Returns `(; Y, dY2, penalty)`.
+`exact` selects the variance of each curve's interpolant, as in [`extrapolate`](@ref).
 """
-function fixed_master_curve(a::Autoscaler, x, own_curve)
+function fixed_master_curve(a::Autoscaler, x, own_curve; exact=false)
     num = den = pen = 0.0
     for c in 1:n_curves(a)
         (!a.use_all_sizes && c == own_curve) && continue
         xs, ys, dys = scaled_data(a, c)
-        y, dy2, d = extrapolate(xs, ys, dys, x)
+        y, dy2, d = extrapolate(xs, ys, dys, x; exact)
         w = 1 / dy2
         num += w * y
         den += w
@@ -81,7 +82,12 @@ julia> map(c -> round(c; digits=3), cost_breakdown(s, 1.0, 0.25, 0.3))
 """
 function cost_breakdown(a::Autoscaler, args::Union{AbstractVector,Tuple})
     isnothing(a.eval_window) && throw(ArgumentError("`eval_window` is not set"))
-    return fixed_window_breakdown(a, get_parameters!(a, args))
+    params = get_parameters!(a, args)
+    if a.integral ≠ :none
+        return integral_window_breakdown(a, params)
+    else
+        return fixed_window_breakdown(a, params)
+    end
 end
 cost_breakdown(a::Autoscaler, args::Vararg{Real}) = cost_breakdown(a, args)
 

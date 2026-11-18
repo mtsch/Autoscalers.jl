@@ -6,6 +6,7 @@
         classic_cost_function=false,
         use_all_sizes=false,
         fix=(;),
+        integral=:none,
     )
 
 Prepare the data in `table` (any Tables.jl table) for a data collapse with `ansatz`. The
@@ -42,6 +43,15 @@ sizes, so the fixed window is recommended.
   only).
 * `fix`: parameters held at fixed values, e.g. `fix=(; a=1/ν)`. They are left out of the
   arguments of the cost.
+* `integral` (experimental, fixed-window cost only): instead of summing over the points
+  in the window, integrate the squared deviation of each curve's linear interpolant from
+  the master curve over the part of the window the curve covers, normalised by its length.
+  `:gk` and `:gk_exact` use adaptive Gauss–Kronrod quadrature (Kronrod 1965) between the
+  points of all curves, which makes the cost smooth in the parameters; `:linear` and
+  `:exact` use the trapezoidal rule on those points. `:gk_exact` and `:exact` use the
+  variance of the interpolant, ``(1 - λ)^2 σ_k^2 + λ^2 σ_{k+1}^2``, so that a correct
+  collapse costs about 1; `:gk` and `:linear` interpolate ``σ^2`` linearly, which gives
+  about ``2/3``. The default `:none` is the sum.
 
 # Data requirements
 
@@ -111,6 +121,10 @@ struct Autoscaler{P,A<:Ansatz{P},D<:NamedTuple,E<:NamedTuple}
     eval_window::Union{Nothing,Tuple{Float64,Float64}}
     eval_mask::BitVector
     penalty::Float64
+    # Experimental windowed integral cost: :none, or trapezoidal with :linear or :exact
+    # interpolated variance, or :gk and :gk_exact (adaptive Gauss–Kronrod with the linear
+    # or exact variance).
+    integral::Symbol
 end
 
 function Autoscaler(
@@ -120,7 +134,14 @@ function Autoscaler(
     eval_window=nothing,
     penalty=100.0,
     fix=(;),
+    integral=:none,
 )
+    if integral ∉ (:none, :linear, :exact, :gk, :gk_exact)
+        throw(ArgumentError("`integral` must be :none, :linear, :exact, :gk or :gk_exact"))
+    end
+    if integral ≠ :none && (classic_cost_function || isnothing(eval_window))
+        throw(ArgumentError("`integral` requires `eval_window` and the fixed-window cost"))
+    end
     if !(fix isa NamedTuple)
         throw(ArgumentError("`fix` must be a `NamedTuple`, e.g. `(; a=1.5)`"))
     end
@@ -259,7 +280,7 @@ function Autoscaler(
         Float64[], Float64[], Float64[],
         fill(NaN, n_params), zeros(n_params),
         classic_cost_function, use_all_sizes,
-        ew, eval_mask, Float64(penalty),
+        ew, eval_mask, Float64(penalty), integral,
     )
     return hardcode_params!(result, fix)
 end
@@ -308,7 +329,7 @@ function Autoscaler(a::Autoscaler; data=a.data, fix=(;))
         Float64[], Float64[], Float64[],
         copy(a.hardcodes), zeros(length(a.last_params)),
         a.classic_cost_function, a.use_all_sizes,
-        a.eval_window, a.eval_mask, a.penalty,
+        a.eval_window, a.eval_mask, a.penalty, a.integral,
     )
     for (name, value) in pairs(fix)
         result.hardcodes[findfirst(==(name), a.ansatz.param_names)] = value
@@ -502,6 +523,8 @@ end
 function cost_function(a::Autoscaler, params)
     if a.classic_cost_function
         return standard_cost_function(a, params)
+    elseif a.integral ≠ :none
+        return integral_window_cost(a, params)
     else
         return fixed_window_cost(a, params)
     end

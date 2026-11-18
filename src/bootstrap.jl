@@ -149,8 +149,9 @@ end
 """
     BootstrapResult
 
-Result of [`bootstrap`](@ref). Use [`confint`](@ref), [`stderror`](@ref) and
-[`pvalue`](@ref) on it; these use only the replicates whose fit converged.
+Result of [`bootstrap`](@ref). Use [`confint`](@ref), [`stderror`](@ref),
+[`pvalue`](@ref) and [`goodness_of_fit`](@ref) on it; these use only the replicates whose
+fit converged.
 
 # Fields
 
@@ -158,6 +159,7 @@ Result of [`bootstrap`](@ref). Use [`confint`](@ref), [`stderror`](@ref) and
 * `samples`: the refitted free parameters, one row per replicate and one column per
   parameter.
 * `converged`: whether each replicate's fit converged.
+* `costs`: the minimum cost of each replicate's fit.
 """
 struct BootstrapResult{A<:Autoscaler,M,O}
     autoscaler::A
@@ -167,6 +169,13 @@ struct BootstrapResult{A<:Autoscaler,M,O}
     converged::BitVector
     method::M
     options::O
+    costs::Vector{Float64}
+end
+
+# Without replicate costs, for results built by hand; `goodness_of_fit` then throws.
+function BootstrapResult(a, names, estimate, samples, converged, method, options)
+    costs = fill(NaN, length(converged))
+    return BootstrapResult(a, names, estimate, samples, converged, method, options, costs)
 end
 
 function converged_samples(b::BootstrapResult; minimum=1)
@@ -267,11 +276,13 @@ function bootstrap(
     samples = Matrix{Float64}(undef, n, length(names))
     # Not BitVectors: their bits share words, so concurrent writes from threads would race.
     converged = fill(false, n)
+    costs = fill(NaN, n)
     extrapolated = fill(false, n)
     replicate!(n; rng, parallel, progress, desc="Bootstrap: ") do i, rng_i
         s = Autoscaler(a; data=synthetic_data(rng_i, model, a))
         result = minimize_cost(s, estimate; method, options)
         samples[i, :] .= result.params
+        costs[i] = result.cost
         converged[i] = result.converged
         extrapolated[i] = extrapolates(s, result.params)
     end
@@ -281,7 +292,58 @@ function bootstrap(
     end
     warn_extrapolated_replicates(count(extrapolated), n, "bootstrap fits")
     converged = BitVector(converged)
-    return BootstrapResult(a, names, estimate, samples, converged, method, options)
+    return BootstrapResult(a, names, estimate, samples, converged, method, options, costs)
+end
+
+"""
+    goodness_of_fit(b::BootstrapResult)
+
+Bootstrap goodness-of-fit test of the collapse: the fraction of replicates whose fitted
+cost is at least the observed one,
+
+```math
+p = \\frac{1 + \\#\\{i : C^*_i \\ge C\\}}{n + 1},
+```
+
+where ``C`` is the cost at `b.estimate` and ``C^*_i`` that of the fit to replicate ``i``.
+The replicates are drawn from the fitted collapse with the measured errors, so their costs
+show what a collapse that holds within the errors would give for this data and window. A
+small ``p`` means the data deviate from a collapse by more than their errors allow.
+
+Unlike reading the cost as a ``χ^2`` per point, this needs no assumption about the
+distribution of the cost, so it applies to every cost function. `b.estimate` must be the
+minimum of the cost, e.g. the result of [`fit_collapse`](@ref).
+
+# Examples
+
+```jldoctest
+julia> using Random
+
+julia> rng = Xoshiro(0);
+
+julia> data = [(; L, x, y=L^-0.25 * tanh(L * (x - 0.3)) + 2e-3 * randn(rng), y_err=2e-3)
+               for L in (8, 16, 32) for x in 0.2:0.005:0.4];
+
+julia> s = Autoscaler(data; eval_window=(0.29, 0.31));
+
+julia> b = bootstrap(s, fit_collapse(s, [1.1, 0.2, 0.31]).params; n=200, rng=Xoshiro(1));
+
+julia> goodness_of_fit(b) > 0.05
+true
+```
+
+# References
+
+- A. C. Davison and D. V. Hinkley, *Bootstrap Methods and their Application*, Cambridge
+  University Press (1997), Sec. 4.2,
+  [doi:10.1017/CBO9780511802843](https://doi.org/10.1017/CBO9780511802843).
+"""
+function goodness_of_fit(b::BootstrapResult)
+    costs = b.costs[b.converged]
+    isempty(costs) && throw(ArgumentError("no bootstrap replicate converged"))
+    any(isnan, costs) && throw(ArgumentError("this result has no replicate costs"))
+    observed = b.autoscaler(b.estimate)
+    return (1 + count(≥(observed), costs)) / (length(costs) + 1)
 end
 
 normal_cdf(z) = erfc(-z / √2) / 2
