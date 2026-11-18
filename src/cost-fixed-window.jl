@@ -55,6 +55,23 @@ function covered(a::Autoscaler, x, own_curve)
     end
 end
 
+# At the current scaling, the number of scored points (sum) or integrated curves (integral)
+# at which the window cost extrapolates another curve beyond its data.
+function n_extrapolated(a::Autoscaler)
+    if a.cost == :sum
+        return count(eachindex(a.x_val_scaled)) do i
+            return a.eval_mask[i] && !covered(a, a.x_val_scaled[i], a.curve[i])
+        end
+    else
+        # The data of each curve span an interval, so covering both ends of an
+        # integration range covers all of it.
+        return count(1:n_curves(a)) do c
+            r = integration_range(a, c)
+            return !isnothing(r) && !(covered(a, r[1], c) && covered(a, r[2], c))
+        end
+    end
+end
+
 """
     extrapolates(a::Autoscaler, args)
 
@@ -63,63 +80,76 @@ data: for the sum, at a scored point; for the integral, anywhere in a curve's in
 range. Always `false` for the classic cost.
 """
 function extrapolates(a::Autoscaler, args)
-    isnothing(a.eval_window) && return false
+    a.cost == :classic && return false
     transform!(a, get_parameters!(a, args))
-    if a.integral == :none
-        return any(eachindex(a.x_val_scaled)) do i
-            return a.eval_mask[i] && !covered(a, a.x_val_scaled[i], a.curve[i])
-        end
-    else
-        # The data of each curve span an interval, so covering both ends of an
-        # integration range covers all of it.
-        return any(1:n_curves(a)) do c
-            r = integration_range(a, c)
-            return !isnothing(r) && !(covered(a, r[1], c) && covered(a, r[2], c))
-        end
+    return n_extrapolated(a) > 0
+end
+
+# Unscaled x of a curve with data `(ts, xs)` at scaled `x`, moved by whole floats with
+# `step` (`nextfloat` or `prevfloat`) until mapping it back does not cross `x`: the two
+# interpolations do not invert each other exactly in floating point.
+function unscaled_at(xs, ts, x, step)
+    t = interpolate(xs, ts, x)::Float64
+    while (step === nextfloat ? (<) : (>))(interpolate(ts, xs, t)::Float64, x)
+        t = step(t)
     end
+    return t
 end
 
 """
-    extrapolation_free_window(a::Autoscaler, params)
+    extrapolation_free_window(a::Autoscaler, args)
 
-At the full parameters `params`, the number of scored points that need extrapolation, and
-the widest part of `eval_window` around its centre in which no point does (or `nothing`).
-A point needs extrapolation when its scaled `x` lies outside the data of another curve.
+At the free parameters `args`, the largest part `(lo, hi)` of `eval_window` in which the
+window cost needs no extrapolation, or `nothing` if there is none.
+
+Each curve that the window cost uses is covered by all other curves for scaled `x`
+between the largest first and the smallest last scaled `x` of the others. That range is
+mapped back to the curve's unscaled `x`, and these intervals are intersected.
 """
-function extrapolation_free_window(a::Autoscaler, params)
-    transform!(a, params)
-    ok = [covered(a, a.x_val_scaled[i], a.curve[i]) for i in eachindex(a.x_val_scaled)]
-    n_extrapolated = count(.!ok .& a.eval_mask)
-    # Rows that share an unscaled `x` are kept or dropped together by a window.
-    candidates = sort!(unique(raw_x(a)[a.eval_mask]))
-    bad = Set(raw_x(a)[.!ok])
-    centre = sum(a.eval_window) / 2
-    k = argmin(abs.(candidates .- centre))
-    if candidates[k] in bad
-        return n_extrapolated, nothing
+function extrapolation_free_window(a::Autoscaler, args)
+    transform!(a, get_parameters!(a, args))
+    ts_all = raw_x(a)
+    lo = max(a.eval_window[1], minimum(ts_all))
+    hi = min(a.eval_window[2], maximum(ts_all))
+    for c in 1:n_curves(a)
+        uses_window(a, c) || continue
+        others = [scaled_data(a, o).x_val for o in 1:n_curves(a) if o ≠ c]
+        x_lo, x_hi = maximum(first, others), minimum(last, others)
+        range = a.curve_ranges[c]
+        xs, ts = view(a.x_val_scaled, range), view(ts_all, range)
+        # Nowhere covered: the window would have to avoid this curve's data altogether.
+        (x_lo > x_hi || x_lo > xs[end] || x_hi < xs[1]) && return nothing
+        if x_lo > xs[1]
+            lo = max(lo, unscaled_at(xs, ts, x_lo, nextfloat))
+        end
+        if x_hi < xs[end]
+            hi = min(hi, unscaled_at(xs, ts, x_hi, prevfloat))
+        end
     end
-    lo = hi = k
-    while lo > 1 && candidates[lo - 1] ∉ bad
-        lo -= 1
-    end
-    while hi < length(candidates) && candidates[hi + 1] ∉ bad
-        hi += 1
-    end
-    return n_extrapolated, (candidates[lo], candidates[hi])
+    hi > lo || return nothing
+    # The window cost must still have something to score in the suggested window.
+    in_window(range) = uses_window(
+        a.cost, view(ts_all, range), lo .≤ view(ts_all, range) .≤ hi, (lo, hi)
+    )
+    return any(in_window, a.curve_ranges) ? (lo, hi) : nothing
 end
 
 function warn_extrapolation(a::Autoscaler, args)
-    extrapolates(a, args) || return nothing
-    n, window = extrapolation_free_window(a, get_parameters(a, args))
-    if isnothing(window)
-        suggestion = "no part of `eval_window` around its centre is free of it"
-    else
-        suggestion = "`eval_window=$window` would need none"
-    end
-    if n > 0
+    a.cost == :classic && return nothing
+    transform!(a, get_parameters!(a, args))
+    n = n_extrapolated(a)
+    n == 0 && return nothing
+    if a.cost == :sum
         location = "at $n of $(count(a.eval_mask)) scored points"
     else
-        location = "near the edges of `eval_window`"
+        n_used = count(c -> uses_window(a, c), 1:n_curves(a))
+        location = "in the integration ranges of $n of $n_used curves"
+    end
+    window = extrapolation_free_window(a, args)
+    if isnothing(window)
+        suggestion = "no part of `eval_window` is free of it"
+    else
+        suggestion = "`eval_window=$window` would need none"
     end
     @warn "The fitted collapse extrapolates curves beyond their data $location, so its " *
           "cost compares them with extrapolated master curves; $suggestion."

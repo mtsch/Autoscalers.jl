@@ -168,7 +168,7 @@
         kw = (; method=:null, n=20, rng=Xoshiro(3), progress=false)
         @test pvalue(b, :a => estimate[1]; kw...) > 0.05
         # forcing a far-off value pulls the curves apart: one warning, not one per refit
-        far = r"bootstrap test replicates \(and the fit under the hypothesis\) extrapolate"
+        far = r"bootstrap test replicates extrapolate, and the fit under the hypothesis"
         @test (@test_logs (:warn, far) pvalue(b, :a => 1.3; kw...)) ≈ 1 / 21
         @test (@test_logs (:warn, far) pvalue(b, :a => 1.3, :b => 0.5; kw...)) ≈ 1 / 21
 
@@ -210,9 +210,7 @@
             wide, estimate
         )
         @test Autoscalers.extrapolates(wide, fit.params)
-        _, suggested = Autoscalers.extrapolation_free_window(
-            wide, Autoscalers.get_parameters(wide, fit.params)
-        )
+        suggested = Autoscalers.extrapolation_free_window(wide, fit.params)
         @test 0.22 ≤ suggested[1] < 0.3 < suggested[2] ≤ 0.38
         inside = Autoscaler(noisy; eval_window=suggested)
         @test !Autoscalers.extrapolates(inside, fit.params)

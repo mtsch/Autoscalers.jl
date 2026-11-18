@@ -4,20 +4,32 @@
 # length of that part in scaled x.
 
 """
+    raw_overlap(ts, window)
+
+The part `(t1, t2)` of `window` covered by the sorted unscaled `x` values `ts` of a curve,
+or `nothing` if it has no positive length.
+"""
+function raw_overlap(ts, (lo, hi))
+    t1, t2 = max(lo, first(ts)), min(hi, last(ts))
+    return t2 > t1 ? (t1, t2) : nothing
+end
+
+"""
     integration_range(a::Autoscaler, c)
 
-The scaled `x` at the ends of the part of `eval_window` that the data of curve `c` cover,
-or `nothing` if they cover none of it. Uses the current scaling of `a`.
+The scaled `x` at the ends of the part of `eval_window` that the data of curve `c` cover
+(see [`raw_overlap`](@ref)), or `nothing` if they cover none of it. Uses the current
+scaling of `a`.
 """
 function integration_range(a::Autoscaler, c)
-    lo, hi = a.eval_window
     range = a.curve_ranges[c]
     ts = view(raw_x(a), range)
-    t1, t2 = max(lo, ts[1]), min(hi, ts[end])
-    t2 > t1 || return nothing
+    overlap = raw_overlap(ts, a.eval_window)
+    isnothing(overlap) && return nothing
     # The ends lie within the curve's data, so this never extrapolates. It is exact when
     # the scaling is affine in t, as for L^a (t - t_c).
     xs = view(a.x_val_scaled, range)
+    t1, t2 = overlap
     return interpolate(ts, xs, t1)::Float64, interpolate(ts, xs, t2)::Float64
 end
 
@@ -32,11 +44,17 @@ end
     integral_window_cost(a::Autoscaler, params)
 
 Windowed integral cost: for each curve, the mean of its ``χ^2`` density over its
-[`integration_range`](@ref), averaged over the curves that have one.
+[`integration_range`](@ref), averaged over the curves that have one. The integral is
+evaluated with adaptive Gauss–Kronrod quadrature (Kronrod 1965, via QuadGK.jl).
+
+# References
+
+- A. S. Kronrod, *Nodes and Weights of Quadrature Formulas*, Consultants Bureau, New York
+  (1965).
 """
 function integral_window_cost(a::Autoscaler, params)
     transform!(a, params)
-    exact = a.integral == :gk_exact
+    exact = a.cost == :gk_exact
     # With the linear variance the integrand is nearly polynomial and a low order suffices;
     # the exact variance puts poles near each segment, where a higher order is cheaper.
     order = exact ? 7 : 2
@@ -54,10 +72,8 @@ function integral_window_cost(a::Autoscaler, params)
         end
         sort!(knots)
         # Between knots every interpolant is linear, so the integrand is smooth there;
-        # integrating each segment separately keeps its kinks at the segment ends.
-        f(x) = integrand(a, c, x, exact)
-        chi2 = sum(quadgk(f, knots[k - 1], knots[k]; order, rtol=1e-6)[1]
-                   for k in 2:length(knots))
+        # breaking the interval at the knots keeps its kinks at segment ends.
+        chi2 = quadgk(x -> integrand(a, c, x, exact), knots; order, rtol=1e-6)[1]
         total += chi2 / (x2 - x1)
         n_scored += 1
     end

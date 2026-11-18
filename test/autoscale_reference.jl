@@ -37,11 +37,10 @@ function classic_cost_xr(s, params, lo, hi)
     return n == 0 ? Inf : total / n
 end
 
-# Optim's default initial simplex moves x_c by 50 %, where the sizes no longer overlap and the
-# classic cost is Inf, which stops Nelder-Mead before its first iteration.
+# Like `Autoscalers.minimize_cost`, for a cost that is a plain function: the restricted
+# classic cost below is not an `Autoscaler`.
 function fit_local(f, x0)
-    method = NelderMead(; initial_simplex=Optim.AffineSimplexer(0.0, 0.02))
-    opts = Optim.Options(; iterations=10_000, g_tol=1e-8)
+    method, opts = Autoscalers.default_fit_method(), Autoscalers.default_fit_options()
     res = optimize(f, x0, method, opts)
     res = optimize(f, Optim.minimizer(res), method, opts)
     return Optim.minimizer(res)
@@ -52,8 +51,9 @@ end
     @test length(data.x) == 131
     classic = Autoscaler(data; classic_cost_function=true)
 
-    # S printed for `-xr -0.75 0.75`. Within the rounding of the printed parameters, S varies
-    # by 2e-4 here; other ranges are near jumps of the classic cost and vary by percents.
+    # S printed for `-xr -0.75 0.75`. Within the rounding of the printed parameters, S
+    # varies by 2e-4 here; other ranges are near jumps of the classic cost and vary by
+    # percents.
     p = [0.746708, 0.104098, 0.592709]
     @test classic_cost_xr(classic, p, -0.75, 0.75) ≈ 0.769959 rtol = 1e-3
 

@@ -23,7 +23,8 @@ end
 Linearly interpolate `y` between the knots `x` at `selected_x`, and return `(y, variance)`,
 or `missing` outside the range of `x`. The variance interpolates `y_err²` linearly or,
 with `exact=true`, is the variance of the interpolant of independent points,
-``(1 - λ)^2 σ_1^2 + λ^2 σ_2^2``. Without `y_err`, only the interpolated `y` is returned.
+``(1 - λ)^2 σ_k^2 + λ^2 σ_{k+1}^2`` with ``λ = (x_\\mathrm{sel} - x_k)/(x_{k+1} - x_k)``.
+Without `y_err`, only the interpolated `y` is returned.
 
 ```jldoctest
 julia> x, y, y_err = [0.0, 1.0, 2.0], [0.0, 10.0, 20.0], [1.0, 1.0, 3.0];
@@ -41,11 +42,17 @@ julia> Autoscalers.interpolate(x, y, y_err, 3.0)
 missing
 ```
 """
-function interpolate(x, y, y_err, selected_x; exact=false)
+# Index `k` of the segment `x[k] ≤ selected_x < x[k + 1]`, or of the last knot if
+# `selected_x` is on it; 0 outside the data.
+function segment(x, selected_x)
     k = searchsortedlast(x, selected_x)
+    return k == length(x) && x[k] ≠ selected_x ? 0 : k
+end
+
+function interpolate(x, y, y_err, selected_x; exact=false)
+    k = segment(x, selected_x)
     k == 0 && return missing
     x[k] == selected_x && return y[k], y_err[k]^2
-    k == length(x) && return missing
     value = lerp((x[k], y[k]), (x[k + 1], y[k + 1]), selected_x)
     if exact
         λ = (selected_x - x[k]) / (x[k + 1] - x[k])
@@ -55,10 +62,9 @@ function interpolate(x, y, y_err, selected_x; exact=false)
     end
 end
 function interpolate(x, y, selected_x)
-    k = searchsortedlast(x, selected_x)
+    k = segment(x, selected_x)
     k == 0 && return missing
     x[k] == selected_x && return y[k]
-    k == length(x) && return missing
     return lerp((x[k], y[k]), (x[k + 1], y[k + 1]), selected_x)
 end
 

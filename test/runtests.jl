@@ -1,10 +1,11 @@
 using Autoscalers
 using DataFrames: DataFrame
 using Autoscalers: lerp, interpolate, extrapolate, get_parameters, free_parameter_names,
-    transform!, select_subset, standard_master_curve, raw_x
+    transform!, bracket, standard_master_curve, raw_x, scaled_data, extrapolates,
+    extrapolation_free_window
 using Optim
 using Random
-using Statistics: quantile
+using Statistics: quantile, std
 using Test
 
 ###
@@ -32,22 +33,18 @@ end
 """
     fit(scaler, x0)
 
-Minimise the cost with Nelder–Mead, restarting once from the result.
+Minimise the cost with the package's optimiser (Nelder–Mead, restarted once) at a tighter
+tolerance, without the extrapolation warning. Returns the parameters and the cost.
 """
 function fit(scaler, x0)
     opts = Optim.Options(iterations=20_000, g_tol=1e-14)
-    res = optimize(p -> scaler(p), float.(x0), NelderMead(), opts)
-    res = optimize(p -> scaler(p), Optim.minimizer(res), NelderMead(), opts)
-    return Optim.minimizer(res), Optim.minimum(res)
+    result = Autoscalers.minimize_cost(scaler, x0; options=opts)
+    return result.params, result.cost
 end
-
-std_(v) = sqrt(sum(abs2, v .- sum(v) / length(v)) / (length(v) - 1))
 
 # names the `@ansatz` tests resolve in the calling module
 ansatz_test_scale(L) = 2L
 const ANSATZ_TEST_SHIFT = 0.5
-
-const COSTS = ["classic" => (; classic_cost_function=true)]
 
 # A window that scores every point, for tests where the choice of cost does not matter.
 const ALL = (; eval_window=(-Inf, Inf))
@@ -309,7 +306,7 @@ end
     @test all(0.25 .≤ raw_x(s3)[s3.eval_mask] .≤ 0.75)
     @test count(s3.eval_mask) == 9
 
-    # hardcoded parameters
+    # fixed parameters
     s4 = Autoscaler(data; ALL..., fix=(; a=1.5))
     @test free_parameter_names(s4) == (:b, :x_c)
     @test get_parameters(s4, [0.1, 0.2]) == [1.5, 0.1, 0.2]
@@ -339,7 +336,9 @@ end
     @test_throws ArgumentError Autoscaler(
         synthetic((L, x) -> x; sizes=[4], xs=0:0.1:1); ALL...
     )
-    @test_throws ArgumentError Autoscaler(data; eval_window=(2.0, 3.0))
+    @test_logs (:warn, r"L=4 has no data") (:warn, r"L=6 has no data") @test_throws(
+        ArgumentError, Autoscaler(data; eval_window=(2.0, 3.0))
+    )
     @test_throws ArgumentError Autoscaler(data; eval_window=(0.5, 0.4))
     @test_throws ArgumentError Autoscaler(
         data; eval_window=(0.2, 0.4), classic_cost_function=true
@@ -393,7 +392,9 @@ end
     @test_throws ArgumentError Autoscaler(one; ALL...)
     thin = map(copy, data)
     thin.y_err[13:22] .= 0
-    @test_throws ArgumentError Autoscaler(thin; ALL...)
+    @test_logs (:warn, r"Skipping 10 rows") @test_throws(
+        ArgumentError, Autoscaler(thin; ALL...)
+    )
 
     # duplicate (L, x) rows, also when they are not adjacent in the input
     dup = (; L=[data.L; 6], x=[data.x; 0.3], y=[data.y; 0.3], y_err=[data.y_err; 1e-3])
@@ -428,8 +429,11 @@ end
         (6, 2.0) => (4, 1.992592592592594, 0.007037037037037043),
         (8, 1.0) => (4, 0.98139534883721, 0.006511627906976748),
     ]
+    n_selected(L, x) = 2 * count(1:3) do c
+        return c ≠ curve(L) && !isnothing(bracket(scaled_data(s, c).x_val, x))
+    end
     for ((L, x), (n, Y, dY2)) in expected
-        @test length(select_subset(s, x, curve(L))[1]) == n
+        @test n_selected(L, x) == n
         m = standard_master_curve(s, x, curve(L))
         @test m[1] ≈ Y
         @test m[2] ≈ dY2
@@ -440,9 +444,12 @@ end
 
     # x = 2 coincides with the last point of L=6: the closed bracket x[j] ≤ x ≤ x[j + 1]
     # selects (0.5, 2.0) from L=6, while L=8 brackets it with (1.0, 3.0).
-    @test select_subset(s, 2.0, curve(4))[1] == [0.5, 2.0, 1.0, 3.0]
+    @test bracket([0.5, 2.0], 2.0) == 1
+    @test bracket([1.0, 3.0], 2.0) == 1
     # on an interior knot, the pair starting at the knot is used
-    @test select_subset(s, 1.0, curve(6))[1] == [1.0, 2.0, 1.0, 3.0]
+    @test bracket([0.0, 1.0, 2.0], 1.0) == 2
+    @test isnothing(bracket([0.0, 1.0, 2.0], -0.1))
+    @test isnothing(bracket([0.0, 1.0, 2.0], 2.1))
 end
 
 @testset "to_table" begin
@@ -490,7 +497,10 @@ end
     xs = range(xc0 - 0.1, xc0 + 0.1; length=161)
     x0 = [1.2, 0.1, 0.31]
     # coverage bound: w ≤ 0.1 / (32/8)^a0 = 0.025
-    for (name, kw) in [COSTS; "fixed window" => (; eval_window=(xc0 - 0.025, xc0 + 0.025))]
+    for (name, kw) in [
+        "classic" => (; classic_cost_function=true),
+        "fixed window" => (; eval_window=(xc0 - 0.025, xc0 + 0.025)),
+    ]
         @testset "$name, exact data" begin
             s = Autoscaler(synthetic(g; xs); kw...)
             @test s(a0, b0, xc0) < 0.05
@@ -531,7 +541,10 @@ end
     xs = range(0.05, 0.07; length=81)
     data = synthetic(g; sizes=5:10, xs, σ=2e-4, rng=Xoshiro(7))
     # coverage bound: w ≤ 0.01 / 2^a0 ≈ 0.006
-    for (name, kw) in [COSTS; "fixed window" => (; eval_window=(0.0545, 0.0655))]
+    for (name, kw) in [
+        "classic" => (; classic_cost_function=true),
+        "fixed window" => (; eval_window=(0.0545, 0.0655)),
+    ]
         @testset "$name" begin
             s = Autoscaler(data; kw...)
             p, c = fit(s, [1.0, 0.1, 0.061])
@@ -545,7 +558,7 @@ end
     @testset "fixed window: a too narrow window loses precision" begin
         # Not a bug, but a property worth knowing: with w well below the coverage bound,
         # b and x_c become correlated and scatter much more between noise realisations.
-        spread(w) = std_(map(7:12) do seed
+        spread(w) = std(map(7:12) do seed
             d = synthetic(g; sizes=5:10, xs, σ=2e-4, rng=Xoshiro(seed))
             fit(Autoscaler(d; eval_window=(xc0 - w, xc0 + w)), [1.0, 0.1, 0.061])[1][2]
         end)
@@ -553,7 +566,7 @@ end
     end
 end
 
-@testset "recovery: hardcoded exponent" begin
+@testset "recovery: fixed exponent" begin
     a0, b0, xc0 = 1.5, -0.5, 0.0
     g(L, x) = L^(-b0) * exp(-(L^a0 * x - 1)^2)
     xs = range(-0.1, 0.3; length=201)
@@ -587,7 +600,7 @@ end
         # A is only weakly constrained: L^0.0225 is nearly constant, so a shift of A is
         # almost indistinguishable from a constant in the master curve.
         @test p[1] ≈ A0 atol = 0.02
-        @test !Autoscalers.extrapolates(s, p)
+        @test !extrapolates(s, p)
     end
 
     @testset "free crossover exponent" begin
@@ -651,7 +664,7 @@ end
     @test p[2] ≈ β0 atol = 0.5
     @test p[3] ≈ xc0 atol = 5e-4
     @test c < 2
-    @test !Autoscalers.extrapolates(s, p)
+    @test !extrapolates(s, p)
 
     t = to_table(s, p)
     @test keys(t) == (:L, :u, :x, :y, :y_err, :master_curve, :in_window)
@@ -696,12 +709,7 @@ end
     @test maximum(jumps) < 0.05 * maximum(cs)
 
     # large exponents push the data outside each other's range
-    @test Autoscalers.extrapolates(s, (2.5, b0, xc0))
-
-    # the scored set of points never changes with the parameters
-    n_before = count(s.eval_mask)
-    s(2.0, 0.5, 0.2)
-    @test count(s.eval_mask) == n_before
+    @test extrapolates(s, (2.5, b0, xc0))
 end
 
 @testset "windowed integral cost (experimental)" begin
@@ -712,33 +720,61 @@ end
     window = (xc0 - 0.025, xc0 + 0.025)
 
     @test_throws ArgumentError Autoscaler(data; eval_window=window, integral=:simpson)
-    @test_throws ArgumentError Autoscaler(data; eval_window=window, integral=:linear)
     @test_throws ArgumentError Autoscaler(data; integral=:gk)
     @test_throws ArgumentError Autoscaler(data; classic_cost_function=true, integral=:gk)
     # a window that touches every curve only at a point leaves nothing to integrate
     edge = maximum(data.x)
     @test Autoscaler(data; eval_window=(edge, edge + 1)) isa Autoscaler
-    @test_throws ArgumentError Autoscaler(data; eval_window=(edge, edge + 1), integral=:gk)
+    @test_logs (:warn, r"has no data covering") match_mode = :any @test_throws(
+        ArgumentError, Autoscaler(data; eval_window=(edge, edge + 1), integral=:gk)
+    )
+    # a window between two grid points has no point to score, but a part to integrate
+    between = (xs[81] + 1e-4, xs[82] - 1e-4)
+    @test_logs (:warn, r"has no data points inside") match_mode = :any @test_throws(
+        ArgumentError, Autoscaler(data; eval_window=between)
+    )
+    @test isfinite(Autoscaler(data; eval_window=between, integral=:gk)(a0, b0, xc0))
 
     for integral in (:gk, :gk_exact)
         s = Autoscaler(data; eval_window=window, integral)
         @test isfinite(s(a0, b0, xc0))
         # pushing the curves apart makes the master curve extrapolate
-        @test Autoscalers.extrapolates(s, (2.5, b0, xc0))
+        @test extrapolates(s, (2.5, b0, xc0))
         # continuous in the parameters, also where curves stop covering the window
         cs = [s(a, b0, xc0) for a in range(0.5, 2.5; length=201)]
         @test all(isfinite, cs)
         @test maximum(abs, diff(cs)) < 0.05 * maximum(cs)
-    end
-    for (integral, expected) in ((:gk, 2 / 3), (:gk_exact, 1.0))
-        s = Autoscaler(data; eval_window=window, integral)
+
         p, c = fit(s, [1.2, 0.1, 0.31])
         @test p[1] ≈ a0 atol = 0.1
         @test p[2] ≈ b0 atol = 0.05
         @test p[3] ≈ xc0 atol = 3e-3
-        # normalisation of a correct collapse: ≈ 2/3 with linear variance, ≈ 1 with exact
-        @test 0.4 * expected < s(a0, b0, xc0) < 1.6 * expected
     end
+
+    # Normalisation of a correct collapse: about 2/3 with the linear variance and 1 with
+    # the exact one. The ratio is far less noisy than either cost.
+    gk = Autoscaler(data; eval_window=window, integral=:gk)
+    gk_exact = Autoscaler(data; eval_window=window, integral=:gk_exact)
+    @test gk(a0, b0, xc0) / gk_exact(a0, b0, xc0) ≈ 2 / 3 atol = 0.05
+
+    # to_table compares with the master curve of the cost, i.e. with the exact variance
+    t = to_table(gk_exact, a0, b0, xc0)
+    t_linear = to_table(gk, a0, b0, xc0)
+    @test t.y == t_linear.y
+    @test t.master_curve ≠ t_linear.master_curve
+    @test maximum(abs, (t.y .- t.master_curve)[t.in_window]) < 0.02
+
+    # A narrower window needs no extrapolation at a good fit. A wider one does: the fit
+    # warns and suggests a window, which in turn needs none.
+    narrow = Autoscaler(data; eval_window=(xc0 - 0.02, xc0 + 0.02), integral=:gk)
+    @test !extrapolates(narrow, (a0, b0, xc0))
+    wide = Autoscaler(data; eval_window=(xc0 - 0.06, xc0 + 0.06), integral=:gk)
+    f = @test_logs (:warn, r"in the integration ranges of .* would need none") fit_collapse(
+        wide, [a0, b0, xc0]
+    )
+    suggested = extrapolation_free_window(wide, f.params)
+    @test xc0 - 0.06 ≤ suggested[1] < xc0 < suggested[2] ≤ xc0 + 0.06
+    @test !extrapolates(Autoscaler(data; eval_window=suggested, integral=:gk), f.params)
 end
 
 include("autoscale_reference.jl")

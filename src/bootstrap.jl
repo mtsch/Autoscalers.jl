@@ -139,10 +139,12 @@ end
 
 # One warning for all refits of a bootstrap, instead of one per refit.
 function warn_extrapolated_replicates(k, n, what; hypothesis=false)
-    k > 0 || hypothesis || return nothing
-    also = hypothesis ? " (and the fit under the hypothesis)" : ""
-    @warn "$k of $n $what$also extrapolate curves beyond their data, so their cost " *
-          "compares them with extrapolated master curves; consider shrinking " *
+    parts = String[]
+    k > 0 && push!(parts, "$k of $n $what extrapolate")
+    hypothesis && push!(parts, "the fit under the hypothesis extrapolates")
+    isempty(parts) && return nothing
+    @warn uppercasefirst(join(parts, ", and ")) * " curves beyond their data, so the " *
+          "cost compares them with extrapolated master curves; consider shrinking " *
           "`eval_window`."
     return nothing
 end
@@ -614,9 +616,8 @@ function null_pvalue(
         if free_fit.converged && null_fit.converged
             statistics[i] = null_fit.cost - free_fit.cost
         end
-        extrapolated[i] =
-            extrapolates(free_data, free_fit.params) ||
-            extrapolates(null_data, null_fit.params)
+        free_extrapolates = extrapolates(free_data, free_fit.params)
+        extrapolated[i] = free_extrapolates || extrapolates(null_data, null_fit.params)
     end
     warn_extrapolated_replicates(
         count(extrapolated), n, "bootstrap test replicates";

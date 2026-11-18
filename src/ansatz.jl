@@ -316,18 +316,24 @@ macro ansatz(lambda, options...)
     rhs = rewrite(body.args[3], ctx)
     rhs_columns = copy(ctx.columns)
 
-    n_errors > 0 || throw(ArgumentError(
-        "the left-hand side needs a column with errors, e.g. `(:y ± :y_err)`"
-    ))
-    length(ctx.errors) == n_errors ||
-        throw(ArgumentError("`±` is only allowed on the left-hand side"))
-    errors = Dict(ctx.errors)
-    length(errors) == n_errors ||
-        throw(ArgumentError("each column can have its errors attached only once"))
-    for c in rhs_columns
-        haskey(errors, c) && throw(ArgumentError(
-            "column `$c` has errors and cannot be used on the right-hand side"
+    if n_errors == 0
+        throw(ArgumentError(
+            "the left-hand side needs a column with errors, e.g. `(:y ± :y_err)`"
         ))
+    end
+    if length(ctx.errors) ≠ n_errors
+        throw(ArgumentError("`±` is only allowed on the left-hand side"))
+    end
+    errors = Dict(ctx.errors)
+    if length(errors) ≠ n_errors
+        throw(ArgumentError("each column can have its errors attached only once"))
+    end
+    for c in rhs_columns
+        if haskey(errors, c)
+            throw(ArgumentError(
+                "column `$c` has errors and cannot be used on the right-hand side"
+            ))
+        end
     end
     if isnothing(x)
         candidates = unique(filter(c -> c ≠ size && c ∉ group, rhs_columns))
