@@ -45,12 +45,7 @@ end
 
 Windowed integral cost: for each curve, the mean of its ``χ^2`` density over its
 [`integration_range`](@ref), averaged over the curves that have one. The integral is
-evaluated with adaptive Gauss–Kronrod quadrature (Kronrod 1965, via QuadGK.jl).
-
-# References
-
-- A. S. Kronrod, *Nodes and Weights of Quadrature Formulas*, Consultants Bureau, New York
-  (1965).
+evaluated with adaptive Gauss–Kronrod quadrature from QuadGK.jl.
 """
 function integral_window_cost(a::Autoscaler, params)
     transform!(a, params)

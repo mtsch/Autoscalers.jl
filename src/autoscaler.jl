@@ -49,7 +49,7 @@ sizes, so the fixed window is recommended.
   the master curve over the part of the window the curve covers. The integral is taken
   in the scaled ``x`` and divided by the scaled length of that part; for an ansatz with
   ``x`` affine in the unscaled ``x``, such as ``L^a (x - x_c)``, this is the mean over
-  the window. It is evaluated with adaptive Gauss–Kronrod quadrature (Kronrod 1965)
+  the window. It is evaluated with adaptive Gauss–Kronrod quadrature (QuadGK.jl)
   between the points of all curves. The sum has a kink in the parameters wherever a point
   of one curve crosses a point of another in scaled ``x``; the integral does not. `:gk`
   interpolates ``σ^2`` linearly, so a correct collapse costs about ``2/3``; `:gk_exact`
@@ -90,8 +90,6 @@ true
 
 # References
 
-- A. S. Kronrod, *Nodes and Weights of Quadrature Formulas*, Consultants Bureau, New York
-  (1965).
 - J. Houdayer and A. K. Hartmann, *Low-temperature behavior of two-dimensional Gaussian
   Ising spin glasses*, Phys. Rev. B **70**, 014418 (2004),
   [doi:10.1103/PhysRevB.70.014418](https://doi.org/10.1103/PhysRevB.70.014418).

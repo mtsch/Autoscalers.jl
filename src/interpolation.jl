@@ -16,6 +16,13 @@ function lerp((x1, y1), (x2, y2), selected_x)
     end
 end
 
+# Index `k` of the segment `x[k] ≤ selected_x < x[k + 1]`, or of the last knot if
+# `selected_x` is on it; 0 outside the data.
+function segment(x, selected_x)
+    k = searchsortedlast(x, selected_x)
+    return k == length(x) && x[k] ≠ selected_x ? 0 : k
+end
+
 """
     interpolate(x, y, y_err, selected_x; exact=false)
     interpolate(x, y, selected_x)
@@ -42,13 +49,6 @@ julia> Autoscalers.interpolate(x, y, y_err, 3.0)
 missing
 ```
 """
-# Index `k` of the segment `x[k] ≤ selected_x < x[k + 1]`, or of the last knot if
-# `selected_x` is on it; 0 outside the data.
-function segment(x, selected_x)
-    k = searchsortedlast(x, selected_x)
-    return k == length(x) && x[k] ≠ selected_x ? 0 : k
-end
-
 function interpolate(x, y, y_err, selected_x; exact=false)
     k = segment(x, selected_x)
     k == 0 && return missing
