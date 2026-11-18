@@ -55,7 +55,7 @@ function integral_window_cost(a::Autoscaler, params)
     order = exact ? 7 : 2
     total = 0.0
     n_scored = 0
-    knots = Float64[]
+    knots = a.knots
     for c in 1:n_curves(a)
         r = integration_range(a, c)
         isnothing(r) && continue
@@ -65,10 +65,13 @@ function integral_window_cost(a::Autoscaler, params)
         for x in a.x_val_scaled
             x1 < x < x2 && push!(knots, x)
         end
-        sort!(knots)
+        # Curves on a common grid share knots; a repeated knot would be an empty segment
+        # that still costs QuadGK a full rule evaluation.
+        unique!(sort!(knots))
         # Between knots every interpolant is linear, so the integrand is smooth there;
         # breaking the interval at the knots keeps its kinks at segment ends.
-        chi2 = quadgk(x -> integrand(a, c, x, exact), knots; order, rtol=1e-6)[1]
+        f(x) = integrand(a, c, x, exact)
+        chi2 = quadgk(f, knots; order, rtol=1e-6, segbuf=a.segbuf)[1]
         total += chi2 / (x2 - x1)
         n_scored += 1
     end

@@ -4,7 +4,7 @@ using Tables
 using ForwardDiff: ForwardDiff, Dual
 using Optim: Optim, NelderMead, optimize
 using ProgressMeter: Progress, finish!, next!
-using QuadGK: quadgk
+using QuadGK: alloc_segbuf, quadgk
 using Random: Random, Xoshiro
 using SpecialFunctions: erfc, erfcinv
 using Statistics: quantile, std

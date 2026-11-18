@@ -94,6 +94,9 @@ true
   Ising spin glasses*, Phys. Rev. B **70**, 014418 (2004),
   [doi:10.1103/PhysRevB.70.014418](https://doi.org/10.1103/PhysRevB.70.014418).
 """
+# QuadGK's working buffer of subintervals, for `Float64` integrals.
+const SegmentBuffer = typeof(alloc_segbuf(Float64, Float64, Float64))
+
 struct Autoscaler{P,A<:Ansatz{P},D<:NamedTuple,E<:NamedTuple}
     ansatz::A
 
@@ -123,6 +126,10 @@ struct Autoscaler{P,A<:Ansatz{P},D<:NamedTuple,E<:NamedTuple}
 
     eval_window::Union{Nothing,Tuple{Float64,Float64}}
     eval_mask::BitVector
+
+    # Scratch space for the integral cost, reused across evaluations.
+    knots::Vector{Float64}
+    segbuf::SegmentBuffer
 end
 
 function Autoscaler(
@@ -279,6 +286,7 @@ function Autoscaler(
         sizes, curve, curve_ranges, curve_labels,
         fill(NaN, n_params), zeros(n_params),
         cost, use_all_sizes, ew, eval_mask,
+        Float64[], alloc_segbuf(Float64, Float64, Float64),
     )
     return fix_params!(result, fix)
 end
@@ -361,6 +369,7 @@ function Autoscaler(a::Autoscaler; data=a.data, fix=(;))
         data,
         x_val_scaled=zeros(n), y_val_scaled=zeros(n), y_err_scaled=zeros(n),
         fixed=copy(a.fixed), last_params=zeros(length(a.last_params)),
+        knots=Float64[], segbuf=alloc_segbuf(Float64, Float64, Float64),
     )
     fields = (get(replaced, f, getfield(a, f)) for f in fieldnames(Autoscaler))
     return fix_params!(Autoscaler(fields...), fix)
